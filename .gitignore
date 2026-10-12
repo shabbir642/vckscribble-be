@@ -5,3 +5,5 @@ dist/
 *.db-wal
 .env
 .DS_Store
+data/
+*.db-shm
