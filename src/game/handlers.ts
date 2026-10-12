@@ -13,6 +13,7 @@ import {
   clearStrokes,
   undoStroke,
 } from './drawing.js';
+import { allow, forgetSocket } from './limits.js';
 import type { RoundEngine } from './round.js';
 import { StoreError, store } from './store.js';
 import type { PlayerRecord, Room } from './types.js';
@@ -77,6 +78,10 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
 
   socket.on('room:create', (payload, ack) => {
     try {
+      if (!allow(socket.id, 'room:create')) {
+        ack(fail('RATE_LIMITED', 'Too many rooms, too fast'));
+        return;
+      }
       const name = Name.parse(payload?.name);
       const avatar = Avatar.parse(payload?.avatar);
       const { room, player } = store.create(name, avatar, socket.id);
@@ -172,6 +177,10 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
    *  the round starts immediately, so there is no review window. */
   socket.on('word:custom', (payload, ack) => {
     try {
+      if (!allow(socket.id, 'word:custom')) {
+        ack(fail('RATE_LIMITED', 'Slow down a moment'));
+        return;
+      }
       const { room, player } = seatOf(socket);
       const text = z.string().min(1).max(60).parse(payload?.text);
       engine.custom(room, player, text);
@@ -197,6 +206,7 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
 
   socket.on('chat:guess', (payload) => {
     try {
+      if (!allow(socket.id, 'chat:guess')) return;
       const { room, player } = seatOf(socket);
       const text = z.string().min(1).max(120).parse(payload?.text);
       engine.guess(room, player, text);
@@ -210,6 +220,7 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
 
   socket.on('draw:stroke', (payload) => {
     try {
+      if (!allow(socket.id, 'draw:stroke')) return;
       const { room, player } = seatOf(socket);
       assertMayDraw(room, player);
       const stroke = StrokeSchema.parse(payload?.stroke);
@@ -248,6 +259,7 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
   });
 
   socket.on('disconnect', (reason) => {
+    forgetSocket(socket.id);
     const res = store.disconnect(socket.id);
     if (!res) return;
     const { room, player } = res;

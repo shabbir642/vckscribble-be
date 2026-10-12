@@ -18,15 +18,19 @@ const collect = (s, ev, ms) => new Promise((res) => { const out = []; const h = 
 
 console.log(`\nM5 guessing & scoring — ${URL}\n`);
 
+// room:state follows the ack immediately, so listeners go on first.
 const drawer = await connect();
+const dState = next(drawer, 'room:state');
 const { roomCode: code } = await emit(drawer, 'room:create', { name: 'Dee', avatar: 0 });
-await next(drawer, 'room:state');
+await dState;
 const g1 = await connect();
+const g1State = next(g1, 'room:state');
 await emit(g1, 'room:join', { roomCode: code, name: 'Gus', avatar: 1 });
-await next(g1, 'room:state');
+await g1State;
 const g2 = await connect();
+const g2State = next(g2, 'room:state');
 await emit(g2, 'room:join', { roomCode: code, name: 'Hal', avatar: 2 });
-await next(g2, 'room:state');
+await g2State;
 
 await emit(drawer, 'room:settings', { rounds: 1, drawSeconds: 60, selectSeconds: 20 });
 const opts = next(drawer, 'word:options');

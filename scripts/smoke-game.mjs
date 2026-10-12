@@ -25,13 +25,16 @@ const next = (s, ev, ms = 6000) => new Promise((res, rej) => {
 
 console.log(`\nM4 round machine — ${URL}\n`);
 
+// room:state follows the ack immediately, so listeners go on first.
 const a = await connect();
+const aState = next(a, 'room:state');
 const created = await emit(a, 'room:create', { name: 'Ann', avatar: 0 });
 const code = created.roomCode;
-await next(a, 'room:state');
+await aState;
 const b = await connect();
+const bState = next(b, 'room:state');
 await emit(b, 'room:join', { roomCode: code, name: 'Ben', avatar: 1 });
-await next(b, 'room:state');
+await bState;
 
 // short timers so the test runs quickly
 await emit(a, 'room:settings', { rounds: 1, drawSeconds: 30, selectSeconds: 30 });

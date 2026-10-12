@@ -9,6 +9,7 @@ import type {
 import { CONTRACT_VERSION } from './contract/index.js';
 import { ensureSchema, sqlite } from './db/index.js';
 import { seedWords } from './db/seed.js';
+import { wordsRouter } from './http/words.js';
 import { registerHandlers } from './game/handlers.js';
 import { RoundEngine } from './game/round.js';
 import { store } from './game/store.js';
@@ -23,8 +24,11 @@ console.log(
 );
 
 const app = express();
+// Behind Fly/Railway's proxy, so client IPs come from X-Forwarded-For.
+app.set('trust proxy', 1);
+app.disable('x-powered-by');
 app.use(cors({ origin: CLIENT_ORIGIN, credentials: true }));
-app.use(express.json({ limit: '64kb' }));
+app.use(express.json({ limit: '256kb' }));
 
 app.get('/api/health', (_req, res) => {
   const { c } = sqlite
@@ -37,6 +41,8 @@ app.get('/api/health', (_req, res) => {
     rooms: store.size,
   });
 });
+
+app.use('/api', wordsRouter());
 
 const httpServer = createServer(app);
 
@@ -80,4 +86,30 @@ sweeper.unref();
 
 httpServer.listen(PORT, () => {
   console.log(`[http] listening on :${PORT} — client origin ${CLIENT_ORIGIN}`);
+  if (!process.env.WORDS_API_TOKEN) {
+    console.log('[http] POST /api/words disabled (WORDS_API_TOKEN unset)');
+  }
 });
+
+/**
+ * SQLite in WAL mode needs a clean close, or the -wal file is left for the next
+ * boot to recover. Platforms send SIGTERM on deploy, so handle both.
+ */
+function shutdown(signal: string): void {
+  console.log(`[http] ${signal} — shutting down`);
+  clearInterval(ticker);
+  clearInterval(sweeper);
+  io.close();
+  httpServer.close(() => {
+    try {
+      sqlite.close();
+    } catch (e) {
+      console.error('[db] close failed', e);
+    }
+    process.exit(0);
+  });
+  // Don't hang forever on a stuck connection.
+  setTimeout(() => process.exit(0), 5000).unref();
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));

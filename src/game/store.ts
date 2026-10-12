@@ -199,7 +199,9 @@ export class RoomStore {
     if (room.hostId !== actorId) {
       throw new StoreError('NOT_HOST', 'Only the host can start the game');
     }
-    if (room.round.phase !== 'lobby') {
+    // 'finished' is allowed so the host can run it back without everyone
+    // having to leave and rebuild the room.
+    if (room.round.phase !== 'lobby' && room.round.phase !== 'finished') {
       throw new StoreError('BAD_PHASE', 'The game is already running');
     }
     const present = [...room.players.values()].filter((p) => p.connected).length;

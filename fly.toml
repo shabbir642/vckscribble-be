@@ -1,0 +1,34 @@
+# fly launch --no-deploy generates this; committed so deploys are reproducible.
+app = "vckscribble"
+primary_region = "lhr"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  DATABASE_URL = "/data/game.db"
+  # Set CLIENT_ORIGIN to the deployed frontend URL:
+  #   fly secrets set CLIENT_ORIGIN=https://vckscribble.pages.dev
+  # and WORDS_API_TOKEN to enable POST /api/words.
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  # Rooms live in memory, so a second machine would not see the first's rooms.
+  # Scaling out needs shared state (Redis adapter) first — see PLAN.md.
+  min_machines_running = 1
+
+[[http_service.checks]]
+  grace_period = "10s"
+  interval = "30s"
+  timeout = "3s"
+  method = "GET"
+  path = "/api/health"
+
+# SQLite lives on a volume; without this the dictionary resets on every deploy.
+[mounts]
+  source = "vckscribble_data"
+  destination = "/data"

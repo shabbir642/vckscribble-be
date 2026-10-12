@@ -52,10 +52,41 @@ SELECT text, times_drawn, times_guessed,
 FROM words WHERE times_drawn >= 10 ORDER BY guess_pct ASC;
 ```
 
-`POST /api/words` (bearer token) lands at M8 as a convenience over the above.
+### `POST /api/words`
+
+A convenience over the SQL above, for adding words without shell access to the
+volume. Disabled unless `WORDS_API_TOKEN` is set — an unconfigured deploy fails
+closed rather than exposing a public write endpoint.
+
+```bash
+curl -X POST https://your-app.fly.dev/api/words \
+  -H "authorization: Bearer $WORDS_API_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"words":[{"text":"shiny object syndrome","category":"idiom","drawability":1}]}'
+# -> {"ok":true,"inserted":1,"skipped":0,"received":1}
+```
+
+Idempotent on the normalized text, so re-posting the same list is safe.
 
 Bulk additions belong in `src/db/words.seed.ts` instead — version-controlled,
 reviewable in diffs, and re-seeding never overwrites rows you edited by hand.
+
+## Deploy
+
+Single container; the SQLite file lives on a mounted volume, without which the
+dictionary resets on every deploy.
+
+```bash
+fly launch --no-deploy       # fly.toml is committed
+fly volumes create vckscribble_data --size 1
+fly secrets set CLIENT_ORIGIN=https://your-frontend.example
+fly secrets set WORDS_API_TOKEN="$(openssl rand -hex 24)"
+fly deploy
+```
+
+Rooms are held in memory, so a second machine would not see the first's rooms:
+`min_machines_running = 1` and no horizontal scaling until a shared-state
+adapter (Redis) is added.
 
 ## Scripts
 
@@ -66,3 +97,6 @@ reviewable in diffs, and re-seeding never overwrites rows you edited by hand.
 | `pnpm typecheck` | tsc --noEmit |
 | `pnpm db:seed` | seed dictionary (idempotent) |
 | `pnpm db:studio` | Drizzle Studio |
+| `pnpm smoke` | room lifecycle (29 cases, needs a running server) |
+| `pnpm smoke:game` | round machine (22 cases) |
+| `pnpm smoke:guess` | guessing & scoring (11 cases) |
