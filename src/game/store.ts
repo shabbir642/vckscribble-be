@@ -62,6 +62,14 @@ export class RoomStore {
       strokes: [],
       createdAt: Date.now(),
       lastActivity: Date.now(),
+      seq: 0,
+      turnIndex: 0,
+      drawOrder: [],
+      usedWordIds: [],
+      active: null,
+      offered: [],
+      revealed: [],
+      customCounts: {},
     };
     this.rooms.set(code, room);
     const player = this.addPlayer(room, name, avatar, socketId);
@@ -244,6 +252,10 @@ export class RoomStore {
 
   get size(): number {
     return this.rooms.size;
+  }
+
+  all(): Room[] {
+    return [...this.rooms.values()];
   }
 }
 

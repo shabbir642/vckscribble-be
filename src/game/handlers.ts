@@ -13,8 +13,10 @@ import {
   clearStrokes,
   undoStroke,
 } from './drawing.js';
+import type { RoundEngine } from './round.js';
 import { StoreError, store } from './store.js';
 import type { PlayerRecord, Room } from './types.js';
+import { reportSuggestion } from './words.js';
 
 type IO = Server<ClientToServerEvents, ServerToClientEvents>;
 type Sock = Socket<ClientToServerEvents, ServerToClientEvents>;
@@ -58,7 +60,7 @@ function systemMessage(text: string): ChatMessage {
   };
 }
 
-export function registerHandlers(io: IO, socket: Sock): void {
+export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): void {
   /** Full snapshot to one socket; everyone else just needs the roster. */
   const sendState = (room: Room, player: PlayerRecord) => {
     socket.emit('room:state', {
@@ -146,13 +148,61 @@ export function registerHandlers(io: IO, socket: Sock): void {
       const { room, player } = seatOf(socket);
       store.assertCanStart(room, player.id);
       ack({ ok: true });
-      // The round state machine is M4. Validation is real; the loop is not yet.
-      io.to(room.code).emit(
-        'chat:message',
-        systemMessage('Ready to start — the round loop arrives in M4.'),
-      );
+      io.to(room.code).emit('chat:message', systemMessage('Game starting…'));
+      engine.startGame(room);
     } catch (e) {
       ack(toFailure(e));
+    }
+  });
+
+  /* ------------------------------------------------------- word choice */
+
+  socket.on('word:choose', (payload, ack) => {
+    try {
+      const { room, player } = seatOf(socket);
+      const wordId = z.number().int().positive().parse(payload?.wordId);
+      engine.choose(room, player, wordId);
+      ack({ ok: true });
+    } catch (e) {
+      ack(toFailure(e));
+    }
+  });
+
+  /** Requirement 1: drawer writes their own word. Validated synchronously —
+   *  the round starts immediately, so there is no review window. */
+  socket.on('word:custom', (payload, ack) => {
+    try {
+      const { room, player } = seatOf(socket);
+      const text = z.string().min(1).max(60).parse(payload?.text);
+      engine.custom(room, player, text);
+      ack({ ok: true });
+    } catch (e) {
+      ack(toFailure(e));
+    }
+  });
+
+  socket.on('word:report', (payload, ack) => {
+    try {
+      const { room } = seatOf(socket);
+      z.string().max(200).parse(payload?.reason ?? '');
+      if (room.active) {
+        reportSuggestion(room.active.normalized);
+        console.warn(`[report] "${room.active.text}" in ${room.code}`);
+      }
+      ack({ ok: true });
+    } catch (e) {
+      ack(toFailure(e));
+    }
+  });
+
+  socket.on('chat:guess', (payload) => {
+    try {
+      const { room, player } = seatOf(socket);
+      const text = z.string().min(1).max(120).parse(payload?.text);
+      engine.guess(room, player, text);
+    } catch (e) {
+      const f = toFailure(e);
+      socket.emit('error:toast', { code: f.code, message: f.message });
     }
   });
 
@@ -203,6 +253,12 @@ export function registerHandlers(io: IO, socket: Sock): void {
     const { room, player } = res;
     broadcastPlayers(room);
     io.to(room.code).emit('chat:message', systemMessage(`${player.name} disconnected`));
+    if (
+      room.round.drawerId === player.id &&
+      (room.round.phase === 'selecting' || room.round.phase === 'drawing')
+    ) {
+      engine.endTurn(room, 'drawer-left');
+    }
     console.log(`[io] ${player.name} left ${room.code} (${reason})`);
   });
 }

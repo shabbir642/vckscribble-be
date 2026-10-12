@@ -10,6 +10,7 @@ import { CONTRACT_VERSION } from './contract/index.js';
 import { ensureSchema, sqlite } from './db/index.js';
 import { seedWords } from './db/seed.js';
 import { registerHandlers } from './game/handlers.js';
+import { RoundEngine } from './game/round.js';
 import { store } from './game/store.js';
 
 const PORT = Number(process.env.PORT ?? 3001);
@@ -44,13 +45,31 @@ export const io = new Server<ClientToServerEvents, ServerToClientEvents>(
   { cors: { origin: CLIENT_ORIGIN, credentials: true } },
 );
 
+const engine = new RoundEngine(io);
+
 io.on('connection', (socket) => {
-  registerHandlers(io, socket);
+  registerHandlers(io, socket, engine);
 });
+
+/**
+ * One second tick per live room. Clients could derive this from `endsAt`, but
+ * a server tick keeps everyone agreeing despite clock skew and sleeping tabs.
+ */
+const ticker = setInterval(() => {
+  const now = Date.now();
+  for (const room of store.all()) {
+    if (!room.round.endsAt) continue;
+    const secondsLeft = Math.max(0, Math.ceil((room.round.endsAt - now) / 1000));
+    io.to(room.code).emit('round:tick', { secondsLeft });
+  }
+}, 1000);
+ticker.unref();
 
 /** Reaps abandoned lobby seats and dead rooms; see RoomStore.sweep. */
 const sweeper = setInterval(() => {
   const { droppedPlayers, droppedRooms } = store.sweep();
+  // A collected room must not leave round timers running.
+  for (const code of droppedRooms) engine.dispose(code);
   if (droppedPlayers || droppedRooms.length) {
     console.log(
       `[sweep] dropped ${droppedPlayers} players, ${droppedRooms.length} rooms`,

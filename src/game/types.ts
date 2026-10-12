@@ -12,6 +12,14 @@ export interface PlayerRecord extends Player {
   lastSeen: number;
 }
 
+export interface ActiveWord {
+  /** null for a drawer-supplied custom word — it has no dictionary row yet. */
+  wordId: number | null;
+  text: string;
+  normalized: string;
+  custom: boolean;
+}
+
 export interface Room {
   code: string;
   hostId: string;
@@ -23,4 +31,20 @@ export interface Room {
   strokes: Stroke[];
   createdAt: number;
   lastActivity: number;
+
+  /* --- round machine (M4) --- */
+  /** Bumped on every phase change; stale timers compare against it and bail. */
+  seq: number;
+  /** Whose turn it is within the current round. */
+  turnIndex: number;
+  /** Snapshot of player order taken at game start, so mid-game joins don't shuffle turns. */
+  drawOrder: string[];
+  usedWordIds: number[];
+  /** The solution, server-side only. Never serialized into RoundState while drawing. */
+  active: ActiveWord | null;
+  offered: { id: number; text: string }[];
+  /** Indices of revealed letters, grown as the clock runs down. */
+  revealed: number[];
+  /** playerId -> count of custom words this game, for rate limiting. */
+  customCounts: Record<string, number>;
 }

@@ -1,0 +1,521 @@
+import type { Server } from 'socket.io';
+import {
+  type ChatMessage,
+  type ClientToServerEvents,
+  type ServerToClientEvents,
+  isCloseGuess,
+  maskWord,
+  normalizeWord,
+} from '../contract/index.js';
+import { StoreError, store } from './store.js';
+import type { PlayerRecord, Room } from './types.js';
+import {
+  acceptCustomWord,
+  markDrawn,
+  markGuessed,
+  markSuggestionGuessed,
+  pickChoices,
+  wordById,
+} from './words.js';
+
+type IO = Server<ClientToServerEvents, ServerToClientEvents>;
+
+/** How long the solution stays on screen before the next turn. */
+const REVEAL_MS = 4000;
+const SCOREBOARD_MS = 5000;
+/** A drawer may invent at most this many words per game. */
+const MAX_CUSTOM_PER_GAME = 3;
+
+/** Guessing is worth this at the buzzer, rising toward BASE+BONUS at full time. */
+const GUESS_BASE = 60;
+const GUESS_BONUS = 240;
+/** The drawer earns per person who gets it — drawing clearly beats drawing cryptically. */
+const DRAWER_PER_GUESS = 50;
+
+/**
+ * Owns phase transitions and every timer. All timing is server-side: clients
+ * render `endsAt` and are told what to show, so a slow or hostile client cannot
+ * extend its own turn.
+ */
+export class RoundEngine {
+  private timers = new Map<string, NodeJS.Timeout[]>();
+
+  constructor(private io: IO) {}
+
+  /* ------------------------------------------------------------ timers */
+
+  private clear(room: Room): void {
+    for (const t of this.timers.get(room.code) ?? []) clearTimeout(t);
+    this.timers.delete(room.code);
+  }
+
+  /**
+   * Schedules work against a phase snapshot. If anything advances the room in
+   * the meantime — an early finish, a drawer leaving — `seq` moves and the
+   * stale callback silently does nothing. Without this, a cancelled round's
+   * timer would fire into the next one.
+   */
+  private later(room: Room, ms: number, fn: () => void): void {
+    const seq = room.seq;
+    const t = setTimeout(() => {
+      if (room.seq !== seq) return;
+      try {
+        fn();
+      } catch (e) {
+        console.error('[round] timer failed', e);
+      }
+    }, ms);
+    const list = this.timers.get(room.code) ?? [];
+    list.push(t);
+    this.timers.set(room.code, list);
+  }
+
+  private advance(room: Room): void {
+    room.seq++;
+    this.clear(room);
+  }
+
+  /* ------------------------------------------------------- broadcasting */
+
+  /** Public round state: never carries the solution while it is still in play. */
+  private publish(room: Room): void {
+    this.io.to(room.code).emit('round:state', room.round);
+  }
+
+  private sendPlayers(room: Room): void {
+    this.io.to(room.code).emit('room:players', { players: store.publicPlayers(room) });
+  }
+
+  private system(room: Room, text: string): void {
+    this.io.to(room.code).emit('chat:message', {
+      id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      channel: 'system',
+      playerId: null,
+      playerName: null,
+      text,
+      at: Date.now(),
+    });
+  }
+
+  private socketOf(player: PlayerRecord) {
+    return player.socketId ? this.io.sockets.sockets.get(player.socketId) : undefined;
+  }
+
+  /* ------------------------------------------------------------- flow */
+
+  startGame(room: Room): void {
+    this.advance(room);
+    room.drawOrder = room.order.filter((id) => room.players.get(id)?.connected);
+    room.turnIndex = 0;
+    room.usedWordIds = [];
+    room.customCounts = {};
+    room.round = {
+      ...room.round,
+      phase: 'selecting',
+      round: 1,
+      totalRounds: room.settings.rounds,
+      guessedPlayerIds: [],
+    };
+    for (const p of room.players.values()) p.score = 0;
+    this.sendPlayers(room);
+    this.beginSelection(room);
+  }
+
+  private currentDrawer(room: Room): PlayerRecord | null {
+    const id = room.drawOrder[room.turnIndex];
+    return id ? (room.players.get(id) ?? null) : null;
+  }
+
+  private beginSelection(room: Room): void {
+    this.advance(room);
+    room.strokes = [];
+    room.revealed = [];
+    room.active = null;
+    this.io.to(room.code).emit('draw:clear', {});
+
+    const drawer = this.currentDrawer(room);
+    if (!drawer || !drawer.connected) {
+      // Nobody home for this slot — skip rather than stall the room.
+      this.nextTurn(room);
+      return;
+    }
+
+    const choices = pickChoices(room.usedWordIds);
+    if (!choices.length) {
+      this.system(room, 'The dictionary is out of unused words — ending the game.');
+      this.finish(room);
+      return;
+    }
+    room.offered = choices.map((c) => ({ id: c.id, text: c.text }));
+
+    const endsAt = Date.now() + room.settings.selectSeconds * 1000;
+    room.round = {
+      ...room.round,
+      phase: 'selecting',
+      drawerId: drawer.id,
+      maskedWord: null,
+      solution: null,
+      endsAt,
+      guessedPlayerIds: [],
+    };
+    this.publish(room);
+    this.system(room, `${drawer.name} is choosing a word…`);
+
+    this.socketOf(drawer)?.emit('word:options', {
+      choices,
+      allowCustom:
+        room.settings.allowCustomWords &&
+        (room.customCounts[drawer.id] ?? 0) < MAX_CUSTOM_PER_GAME,
+    });
+
+    // One stalled drawer must not freeze the room.
+    this.later(room, room.settings.selectSeconds * 1000, () => {
+      const pick = choices[Math.floor(Math.random() * choices.length)]!;
+      this.system(room, `${drawer.name} took too long — picked for them.`);
+      this.beginDrawing(room, {
+        wordId: pick.id,
+        text: pick.text,
+        normalized: normalizeWord(pick.text),
+        custom: false,
+      });
+    });
+  }
+
+  choose(room: Room, player: PlayerRecord, wordId: number): void {
+    this.assertSelecting(room, player);
+    if (!room.offered.some((o) => o.id === wordId)) {
+      throw new StoreError('INVALID', 'That word was not offered');
+    }
+    const word = wordById(wordId);
+    if (!word) throw new StoreError('INVALID', 'That word is no longer available');
+    this.beginDrawing(room, {
+      wordId: word.id,
+      text: word.text,
+      normalized: normalizeWord(word.text),
+      custom: false,
+    });
+  }
+
+  /** Requirement 1: the drawer writes their own instead of taking an offer. */
+  custom(room: Room, player: PlayerRecord, text: string): void {
+    this.assertSelecting(room, player);
+    if (!room.settings.allowCustomWords) {
+      throw new StoreError('INVALID', 'Custom words are off in this room');
+    }
+    const used = room.customCounts[player.id] ?? 0;
+    if (used >= MAX_CUSTOM_PER_GAME) {
+      throw new StoreError('RATE_LIMITED', `Only ${MAX_CUSTOM_PER_GAME} custom words per game`);
+    }
+    const clean = acceptCustomWord(text, player.id, room.code);
+    room.customCounts[player.id] = used + 1;
+    this.beginDrawing(room, {
+      wordId: null,
+      text: clean,
+      normalized: normalizeWord(clean),
+      custom: true,
+    });
+  }
+
+  private assertSelecting(room: Room, player: PlayerRecord): void {
+    if (room.round.phase !== 'selecting') {
+      throw new StoreError('BAD_PHASE', 'Not choosing a word right now');
+    }
+    if (room.round.drawerId !== player.id) {
+      throw new StoreError('NOT_DRAWER', 'You are not the drawer');
+    }
+  }
+
+  private beginDrawing(room: Room, active: Room['active']): void {
+    if (!active) return;
+    this.advance(room);
+    room.active = active;
+    room.offered = [];
+    room.revealed = [];
+    if (!active.custom) {
+      room.usedWordIds.push(active.wordId!);
+      markDrawn(active.wordId);
+    }
+
+    const ms = room.settings.drawSeconds * 1000;
+    room.round = {
+      ...room.round,
+      phase: 'drawing',
+      maskedWord: maskWord(active.text),
+      solution: null,
+      endsAt: Date.now() + ms,
+      guessedPlayerIds: [],
+    };
+    this.publish(room);
+
+    const drawer = this.currentDrawer(room);
+    if (drawer) this.socketOf(drawer)?.emit('word:assigned', { text: active.text });
+
+    this.scheduleHints(room, active.text, ms);
+    this.later(room, ms, () => this.endTurn(room, 'time'));
+  }
+
+  /**
+   * Letters appear as the clock drains, capped at ~35% of non-space characters
+   * and spread across every word in the phrase — front-loading the first word
+   * of "circle back" would give away far more than a third of it.
+   */
+  private scheduleHints(room: Room, text: string, totalMs: number): void {
+    const indices = [...text].map((c, i) => (c === ' ' ? -1 : i)).filter((i) => i >= 0);
+    const budget = Math.floor(indices.length * 0.35);
+    if (budget <= 0) return;
+
+    const perWord = new Map<number, number[]>();
+    let word = 0;
+    for (let i = 0; i < text.length; i++) {
+      if (text[i] === ' ') { word++; continue; }
+      const list = perWord.get(word) ?? [];
+      list.push(i);
+      perWord.set(word, list);
+    }
+    // Round-robin across words so every word thaws at a similar rate.
+    const queues = [...perWord.values()].map((l) => shuffle(l));
+    const order: number[] = [];
+    for (let i = 0; order.length < budget; i++) {
+      let progressed = false;
+      for (const q of queues) {
+        if (i < q.length) { order.push(q[i]!); progressed = true; }
+        if (order.length >= budget) break;
+      }
+      if (!progressed) break;
+    }
+
+    const firstAt = totalMs * 0.45;
+    const gap = (totalMs * 0.45) / Math.max(1, order.length);
+    order.forEach((idx, n) => {
+      this.later(room, firstAt + gap * n, () => {
+        room.revealed.push(idx);
+        const masked = maskWord(text, new Set(room.revealed));
+        room.round = { ...room.round, maskedWord: masked };
+        this.io.to(room.code).emit('round:hint', { maskedWord: masked });
+      });
+    });
+  }
+
+  /* ----------------------------------------------------------- guessing */
+
+  /**
+   * One entry point for everything typed into chat during a round. Returns
+   * nothing: all feedback goes out as events, because what each player may see
+   * differs — the guesser, the people who already solved it, and everyone else
+   * get different views of the same message.
+   */
+  guess(room: Room, player: PlayerRecord, raw: string): void {
+    const text = raw.trim().slice(0, 120);
+    if (!text) return;
+
+    const active = room.active;
+    const live = room.round.phase === 'drawing' && active !== null;
+
+    // Outside a live round chat is just chat.
+    if (!live) {
+      this.broadcastChat(room, this.chat('guess', player, text));
+      return;
+    }
+
+    // The drawer typing would be an instant spoiler, deliberate or not.
+    if (room.round.drawerId === player.id) {
+      this.socketOf(player)?.emit('error:toast', {
+        code: 'NOT_DRAWER',
+        message: 'You are drawing — no chatting!',
+      });
+      return;
+    }
+
+    const already = room.round.guessedPlayerIds.includes(player.id);
+    if (already) {
+      // Solvers talk among themselves; the room must not see it.
+      this.sendToSolvers(room, this.chat('post-guess', player, text));
+      return;
+    }
+
+    if (normalizeWord(text) === active!.normalized) {
+      this.award(room, player);
+      return;
+    }
+
+    if (isCloseGuess(text, active!.text)) {
+      this.socketOf(player)?.emit('chat:close', { text: `"${text}" is close!` });
+    }
+    this.broadcastChat(room, this.chat('guess', player, text));
+  }
+
+  private award(room: Room, player: PlayerRecord): void {
+    const total = room.settings.drawSeconds * 1000;
+    const left = Math.max(0, (room.round.endsAt ?? 0) - Date.now());
+    const frac = total > 0 ? Math.min(1, left / total) : 0;
+
+    player.score += Math.round(GUESS_BASE + GUESS_BONUS * frac);
+    room.round = {
+      ...room.round,
+      guessedPlayerIds: [...room.round.guessedPlayerIds, player.id],
+    };
+
+    const drawer = room.round.drawerId ? room.players.get(room.round.drawerId) : null;
+    if (drawer) drawer.score += DRAWER_PER_GUESS;
+
+    // Stats feed the retirement query — see PLAN.md §7a.
+    if (room.active?.custom) markSuggestionGuessed(room.active.normalized);
+    else markGuessed(room.active?.wordId ?? null);
+
+    this.system(room, `${player.name} guessed it!`);
+    this.publish(room);
+    this.sendPlayers(room);
+
+    // Everyone but the drawer has it — no reason to run the clock down.
+    const pending = [...room.players.values()].filter(
+      (p) =>
+        p.connected &&
+        p.id !== room.round.drawerId &&
+        !room.round.guessedPlayerIds.includes(p.id),
+    );
+    if (pending.length === 0) this.endTurn(room, 'all-guessed');
+  }
+
+  private chat(
+    channel: ChatMessage['channel'],
+    player: PlayerRecord,
+    text: string,
+  ): ChatMessage {
+    return {
+      id: `m-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      channel,
+      playerId: player.id,
+      playerName: player.name,
+      text,
+      at: Date.now(),
+    };
+  }
+
+  private broadcastChat(room: Room, m: ChatMessage): void {
+    this.io.to(room.code).emit('chat:message', m);
+  }
+
+  /**
+   * Post-guess chat reaches only players who have already solved it, plus the
+   * drawer. Without this the first correct guesser trivially spoils the round
+   * for everyone else.
+   */
+  private sendToSolvers(room: Room, m: ChatMessage): void {
+    for (const p of room.players.values()) {
+      const eligible =
+        p.id === room.round.drawerId || room.round.guessedPlayerIds.includes(p.id);
+      if (eligible) this.socketOf(p)?.emit('chat:message', m);
+    }
+  }
+
+  /** Called by the timer, by the guess handler when everyone is done, or on drawer exit. */
+  endTurn(room: Room, reason: 'time' | 'all-guessed' | 'drawer-left'): void {
+    if (room.round.phase !== 'drawing' && room.round.phase !== 'selecting') return;
+    this.advance(room);
+    const solution = room.active?.text ?? null;
+    room.round = {
+      ...room.round,
+      phase: 'reveal',
+      solution,
+      endsAt: Date.now() + REVEAL_MS,
+    };
+    this.publish(room);
+    this.sendPlayers(room);
+    if (solution) {
+      const why =
+        reason === 'all-guessed' ? 'Everyone got it!'
+        : reason === 'drawer-left' ? 'The drawer left.'
+        : "Time's up.";
+      this.system(room, `${why} The word was "${solution}".`);
+    }
+    this.later(room, REVEAL_MS, () => this.nextTurn(room));
+  }
+
+  private nextTurn(room: Room): void {
+    this.advance(room);
+    room.turnIndex++;
+    if (room.turnIndex < room.drawOrder.length) {
+      this.beginSelection(room);
+      return;
+    }
+    // Everyone has drawn once: that is one round.
+    room.turnIndex = 0;
+    if (room.round.round >= room.settings.rounds) {
+      this.showScoreboard(room, true);
+      return;
+    }
+    room.round = { ...room.round, round: room.round.round + 1 };
+    this.showScoreboard(room, false);
+  }
+
+  private showScoreboard(room: Room, final: boolean): void {
+    this.advance(room);
+    room.round = {
+      ...room.round,
+      phase: 'scoreboard',
+      endsAt: Date.now() + SCOREBOARD_MS,
+      solution: null,
+    };
+    this.publish(room);
+    this.io.to(room.code).emit('game:scores', {
+      players: store.publicPlayers(room),
+      final,
+    });
+    if (final) {
+      this.later(room, SCOREBOARD_MS, () => this.finish(room));
+    } else {
+      this.later(room, SCOREBOARD_MS, () => this.beginSelection(room));
+    }
+  }
+
+  private finish(room: Room): void {
+    this.advance(room);
+    room.round = {
+      ...room.round,
+      phase: 'finished',
+      drawerId: null,
+      maskedWord: null,
+      endsAt: null,
+    };
+    room.active = null;
+    this.publish(room);
+    this.io.to(room.code).emit('game:scores', {
+      players: store.publicPlayers(room),
+      final: true,
+    });
+  }
+
+  /** Back to lobby, e.g. the host wants another game. */
+  reset(room: Room): void {
+    this.advance(room);
+    room.round = {
+      phase: 'lobby',
+      round: 0,
+      totalRounds: room.settings.rounds,
+      drawerId: null,
+      maskedWord: null,
+      solution: null,
+      endsAt: null,
+      guessedPlayerIds: [],
+    };
+    room.active = null;
+    room.strokes = [];
+    this.publish(room);
+    this.io.to(room.code).emit('draw:clear', {});
+  }
+
+  /** A room being collected must not leave timers behind. */
+  dispose(code: string): void {
+    for (const t of this.timers.get(code) ?? []) clearTimeout(t);
+    this.timers.delete(code);
+  }
+}
+
+function shuffle<T>(arr: T[]): T[] {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j]!, a[i]!];
+  }
+  return a;
+}

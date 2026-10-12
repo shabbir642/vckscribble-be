@@ -14,7 +14,10 @@
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
     "db:seed": "tsx src/db/seed-run.ts",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "smoke:game": "node scripts/smoke-game.mjs",
+    "smoke:guess": "node scripts/smoke-guess.mjs",
+    "smoke:all": "node scripts/smoke.mjs && node scripts/smoke-game.mjs && node scripts/smoke-guess.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^11.7.0",
