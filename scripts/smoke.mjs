@@ -113,6 +113,56 @@ check('promoted player may now start',
   (await emit(back, 'room:start', {})).code === 'INVALID'); // only 1 connected
 back.disconnect();
 
+// --- M3 drawing ---------------------------------------------------------
+const d1 = await connect();
+const dCreate = await emit(d1, 'room:create', { name: 'Drawer', avatar: 2 });
+const dCode = dCreate.roomCode;
+await nextEvent(d1, 'room:state');
+const d2 = await connect();
+await emit(d2, 'room:join', { roomCode: dCode, name: 'Watcher', avatar: 4 });
+await nextEvent(d2, 'room:state');
+
+const stroke = (id) => ({
+  id, drawerId: 'spoofed', tool: 'brush', color: '#2f6f4f', size: 0.01,
+  points: [{ x: 0.1, y: 0.1 }, { x: 0.5, y: 0.6 }],
+});
+
+const relayed = nextEvent(d2, 'draw:stroke');
+d1.emit('draw:stroke', { stroke: stroke('s1') });
+const got = await relayed;
+check('stroke relays to other players', got.stroke.id === 's1');
+check('server overrides spoofed drawerId', got.stroke.drawerId !== 'spoofed');
+
+const badStroke = nextEvent(d1, 'error:toast');
+d1.emit('draw:stroke', { stroke: { ...stroke('s2'), color: 'red' } });
+check('malformed stroke rejected', (await badStroke).code === 'INVALID');
+
+// same id twice = one entry (live streaming), not two
+const grown = nextEvent(d2, 'draw:stroke');
+d1.emit('draw:stroke', { stroke: { ...stroke('s1'), points: [{x:0.1,y:0.1},{x:0.5,y:0.6},{x:0.9,y:0.2}] } });
+check('restreamed stroke keeps one id', (await grown).stroke.points.length === 3);
+
+d1.emit('draw:stroke', { stroke: stroke('s3') });
+await new Promise(r => setTimeout(r, 120));
+const undone = nextEvent(d2, 'draw:undo');
+d1.emit('draw:undo', {});
+check('undo removes own last stroke', (await undone).strokeId === 's3');
+
+// late joiner replay
+const d3 = await connect();
+const sync = nextEvent(d3, 'draw:sync');
+await emit(d3, 'room:join', { roomCode: dCode, name: 'Latecomer', avatar: 5 });
+const synced = await sync;
+check('late joiner receives stroke log',
+  synced.strokes.length === 1 && synced.strokes[0].id === 's1',
+  JSON.stringify(synced.strokes.map(s => s.id)));
+
+const cleared = nextEvent(d2, 'draw:clear');
+d1.emit('draw:clear', {});
+await cleared;
+check('clear broadcasts', true);
+d1.disconnect(); d2.disconnect(); d3.disconnect();
+
 console.log(`\n${pass} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('failed:', failures.join('; '));

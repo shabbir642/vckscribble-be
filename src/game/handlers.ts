@@ -6,6 +6,13 @@ import type {
   Failure,
   ServerToClientEvents,
 } from '../contract/index.js';
+import {
+  StrokeSchema,
+  upsertStroke,
+  assertMayDraw,
+  clearStrokes,
+  undoStroke,
+} from './drawing.js';
 import { StoreError, store } from './store.js';
 import type { PlayerRecord, Room } from './types.js';
 
@@ -90,6 +97,7 @@ export function registerHandlers(io: IO, socket: Sock): void {
       ack({ ok: true, token: player.token });
       sendState(room, player);
       broadcastPlayers(room);
+      if (room.strokes.length) socket.emit('draw:sync', { strokes: room.strokes });
       io.to(room.code).emit('chat:message', systemMessage(`${name} joined`));
     } catch (e) {
       ack(toFailure(e));
@@ -145,6 +153,47 @@ export function registerHandlers(io: IO, socket: Sock): void {
       );
     } catch (e) {
       ack(toFailure(e));
+    }
+  });
+
+  /* ------------------------------------------------------------ drawing */
+
+  socket.on('draw:stroke', (payload) => {
+    try {
+      const { room, player } = seatOf(socket);
+      assertMayDraw(room, player);
+      const stroke = StrokeSchema.parse(payload?.stroke);
+      // Trust the seat, not the claim: a client could assert any drawerId.
+      stroke.drawerId = player.id;
+      upsertStroke(room, stroke);
+      socket.to(room.code).emit('draw:stroke', { stroke });
+    } catch (e) {
+      const f = toFailure(e);
+      socket.emit('error:toast', { code: f.code, message: f.message });
+    }
+  });
+
+  socket.on('draw:undo', () => {
+    try {
+      const { room, player } = seatOf(socket);
+      assertMayDraw(room, player);
+      const strokeId = undoStroke(room, player.id);
+      if (strokeId) io.to(room.code).emit('draw:undo', { strokeId });
+    } catch (e) {
+      const f = toFailure(e);
+      socket.emit('error:toast', { code: f.code, message: f.message });
+    }
+  });
+
+  socket.on('draw:clear', () => {
+    try {
+      const { room, player } = seatOf(socket);
+      assertMayDraw(room, player);
+      clearStrokes(room);
+      io.to(room.code).emit('draw:clear', {});
+    } catch (e) {
+      const f = toFailure(e);
+      socket.emit('error:toast', { code: f.code, message: f.message });
     }
   });
 
