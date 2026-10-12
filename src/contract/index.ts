@@ -8,7 +8,7 @@
  * Keep this file dependency-free so both repos can consume it as-is.
  */
 
-export const CONTRACT_VERSION = 1;
+export const CONTRACT_VERSION = 2;
 
 /* ---------------------------------------------------------------- domain */
 
@@ -181,11 +181,20 @@ export type ErrorCode =
   | 'INVALID'
   | 'INTERNAL';
 
-export type Result<T> =
-  | ({ ok: true } & T)
-  | { ok: false; code: ErrorCode; message: string };
+export interface Failure {
+  ok: false;
+  code: ErrorCode;
+  message: string;
+}
 
-export type Ack = (r: Result<Record<string, never>>) => void;
+/**
+ * Defaults to `{}` rather than `Record<string, never>`: intersecting
+ * `{ ok: true }` with `Record<string, never>` collapses `ok` to `never`, making
+ * a success ack impossible to construct.
+ */
+export type Result<T extends object = {}> = ({ ok: true } & T) | Failure;
+
+export type Ack = (r: Result) => void;
 
 /* --------------------------------------------- word rules (both sides) */
 

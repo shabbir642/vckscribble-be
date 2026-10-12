@@ -9,6 +9,8 @@ import type {
 import { CONTRACT_VERSION } from './contract/index.js';
 import { ensureSchema, sqlite } from './db/index.js';
 import { seedWords } from './db/seed.js';
+import { registerHandlers } from './game/handlers.js';
+import { store } from './game/store.js';
 
 const PORT = Number(process.env.PORT ?? 3001);
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN ?? 'http://localhost:5173';
@@ -27,7 +29,12 @@ app.get('/api/health', (_req, res) => {
   const { c } = sqlite
     .prepare('SELECT COUNT(*) AS c FROM words WHERE enabled = 1')
     .get() as { c: number };
-  res.json({ ok: true, contractVersion: CONTRACT_VERSION, enabledWords: c });
+  res.json({
+    ok: true,
+    contractVersion: CONTRACT_VERSION,
+    enabledWords: c,
+    rooms: store.size,
+  });
 });
 
 const httpServer = createServer(app);
@@ -38,12 +45,19 @@ export const io = new Server<ClientToServerEvents, ServerToClientEvents>(
 );
 
 io.on('connection', (socket) => {
-  // Rooms land in M2, the game loop in M4. Connection lifecycle only for now.
-  console.log(`[io] connect ${socket.id}`);
-  socket.on('disconnect', (reason) => {
-    console.log(`[io] disconnect ${socket.id} (${reason})`);
-  });
+  registerHandlers(io, socket);
 });
+
+/** Reaps abandoned lobby seats and dead rooms; see RoomStore.sweep. */
+const sweeper = setInterval(() => {
+  const { droppedPlayers, droppedRooms } = store.sweep();
+  if (droppedPlayers || droppedRooms.length) {
+    console.log(
+      `[sweep] dropped ${droppedPlayers} players, ${droppedRooms.length} rooms`,
+    );
+  }
+}, 30_000);
+sweeper.unref();
 
 httpServer.listen(PORT, () => {
   console.log(`[http] listening on :${PORT} — client origin ${CLIENT_ORIGIN}`);
