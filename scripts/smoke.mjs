@@ -109,8 +109,10 @@ check('host role passes to remaining player', newHost?.id === guestId,
   `got ${newHost?.name ?? 'none'}`);
 check('old host shown disconnected',
   promoted.players.find(p => p.id === hostPlayerId)?.connected === false);
-check('promoted player may now start',
-  (await emit(back, 'room:start', {})).code === 'INVALID'); // only 1 connected
+// `room:start` became real in M4, so the room is mid-game by now: starting
+// again is a phase error, not a player-count error.
+check('cannot restart a running game',
+  (await emit(back, 'room:start', {})).code === 'BAD_PHASE')
 back.disconnect();
 
 // --- M3 drawing ---------------------------------------------------------
