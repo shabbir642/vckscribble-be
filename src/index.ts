@@ -15,7 +15,16 @@ import { RoundEngine } from './game/round.js';
 import { store } from './game/store.js';
 
 const PORT = Number(process.env.PORT ?? 3001);
-const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN ?? 'http://localhost:5173';
+/**
+ * Comma-separated so one deployment can serve several origins — in practice
+ * localhost plus the machine's LAN address, which is how anyone else on the
+ * wifi reaches a dev server. CORS needs the exact origin string, so the LAN
+ * address has to be listed explicitly rather than inferred.
+ */
+const CLIENT_ORIGIN = (process.env.CLIENT_ORIGIN ?? 'http://localhost:5173')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
 
 ensureSchema();
 const report = seedWords();
@@ -85,7 +94,7 @@ const sweeper = setInterval(() => {
 sweeper.unref();
 
 httpServer.listen(PORT, () => {
-  console.log(`[http] listening on :${PORT} — client origin ${CLIENT_ORIGIN}`);
+  console.log(`[http] listening on :${PORT} — client origin ${CLIENT_ORIGIN.join(', ')}`);
   if (!process.env.WORDS_API_TOKEN) {
     console.log('[http] POST /api/words disabled (WORDS_API_TOKEN unset)');
   }

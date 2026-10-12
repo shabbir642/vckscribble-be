@@ -1,6 +1,7 @@
 import type { Server } from 'socket.io';
 import {
   type ChatMessage,
+  type ChatTone,
   type ClientToServerEvents,
   type ServerToClientEvents,
   isCloseGuess,
@@ -86,10 +87,11 @@ export class RoundEngine {
     this.io.to(room.code).emit('room:players', { players: store.publicPlayers(room) });
   }
 
-  private system(room: Room, text: string): void {
+  private system(room: Room, text: string, tone: ChatTone = 'neutral'): void {
     this.io.to(room.code).emit('chat:message', {
       id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       channel: 'system',
+      tone,
       playerId: null,
       playerName: null,
       text,
@@ -341,7 +343,7 @@ export class RoundEngine {
     if (isCloseGuess(text, active!.text)) {
       this.socketOf(player)?.emit('chat:close', { text: `"${text}" is close!` });
     }
-    this.broadcastChat(room, this.chat('guess', player, text));
+    this.broadcastChat(room, this.chat('guess', player, text, 'wrong'));
   }
 
   private award(room: Room, player: PlayerRecord): void {
@@ -362,7 +364,7 @@ export class RoundEngine {
     if (room.active?.custom) markSuggestionGuessed(room.active.normalized);
     else markGuessed(room.active?.wordId ?? null);
 
-    this.system(room, `${player.name} guessed it!`);
+    this.system(room, `${player.name} guessed it!`, 'correct');
     this.publish(room);
     this.sendPlayers(room);
 
@@ -380,10 +382,12 @@ export class RoundEngine {
     channel: ChatMessage['channel'],
     player: PlayerRecord,
     text: string,
+    tone: ChatTone = 'neutral',
   ): ChatMessage {
     return {
       id: `m-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       channel,
+      tone,
       playerId: player.id,
       playerName: player.name,
       text,

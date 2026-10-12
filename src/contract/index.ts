@@ -8,7 +8,7 @@
  * Keep this file dependency-free so both repos can consume it as-is.
  */
 
-export const CONTRACT_VERSION = 2;
+export const CONTRACT_VERSION = 3;
 
 /* ---------------------------------------------------------------- domain */
 
@@ -79,9 +79,17 @@ export interface RoundState {
 
 export type ChatChannel = 'guess' | 'post-guess' | 'system';
 
+/**
+ * How the client should colour a message. The server knows whether a guess was
+ * wrong; the client would otherwise have to infer it by matching the text of
+ * system messages, which breaks the moment the wording changes.
+ */
+export type ChatTone = 'correct' | 'wrong' | 'neutral';
+
 export interface ChatMessage {
   id: string;
   channel: ChatChannel;
+  tone?: ChatTone;
   playerId: string | null;
   playerName: string | null;
   text: string;

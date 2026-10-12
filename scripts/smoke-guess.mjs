@@ -49,6 +49,7 @@ const publicWrong = next(g2, 'chat:message');
 g1.emit('chat:guess', { text: 'definitely not it' });
 const wrongMsg = await publicWrong;
 check('wrong guess is broadcast', wrongMsg.text === 'definitely not it' && wrongMsg.channel === 'guess');
+check('wrong guess is toned for the client', wrongMsg.tone === 'wrong', `tone=${wrongMsg.tone}`);
 
 // near miss is private
 const close = next(g1, 'chat:close', 3000);
@@ -68,6 +69,7 @@ g1.emit('chat:guess', { text: solution.toUpperCase() });
 const sysMsg = await sys;
 check('correct guess announced without revealing word',
   sysMsg.channel === 'system' && sysMsg.text.includes('Gus') && !sysMsg.text.includes(solution));
+check('correct guess is toned for the client', sysMsg.tone === 'correct', `tone=${sysMsg.tone}`);
 const players = (await scored).players;
 const gus = players.find(p => p.name === 'Gus');
 const dee = players.find(p => p.name === 'Dee');
