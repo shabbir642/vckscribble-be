@@ -8,6 +8,7 @@ import {
   maskWord,
   normalizeWord,
 } from '../contract/index.js';
+import { track } from '../obs/events.js';
 import { StoreError, store } from './store.js';
 import type { PlayerRecord, Room } from './types.js';
 import {
@@ -132,6 +133,15 @@ export class RoundEngine {
       guessedPlayerIds: [],
     };
     for (const p of room.players.values()) p.score = 0;
+    track('game_started', {
+      roomCode: room.code,
+      data: {
+        players: room.drawOrder.length,
+        rounds: room.settings.rounds,
+        drawSeconds: room.settings.drawSeconds,
+        allowCustomWords: room.settings.allowCustomWords,
+      },
+    });
     this.sendPlayers(room);
     this.beginSelection(room);
   }
@@ -264,6 +274,17 @@ export class RoundEngine {
     this.publish(room);
 
     const drawer = this.currentDrawer(room);
+    track('turn_started', {
+      roomCode: room.code,
+      playerId: drawer?.id ?? null,
+      playerName: drawer?.name ?? null,
+      data: {
+        round: room.round.round,
+        word: active.text,
+        custom: active.custom,
+        drawers: room.drawOrder.length,
+      },
+    });
     if (drawer) this.socketOf(drawer)?.emit('word:assigned', { text: active.text });
 
     this.scheduleHints(room, active.text, ms);
@@ -493,7 +514,7 @@ export class RoundEngine {
     const connected = [...room.players.values()].filter((p) => p.connected);
     if (connected.length < 2) {
       this.system(room, 'Not enough players left — ending the game.');
-      this.finish(room);
+      this.finish(room, 'abandoned');
       return;
     }
 
@@ -526,6 +547,21 @@ export class RoundEngine {
     };
     this.publish(room);
     this.sendPlayers(room);
+    const guessers = [...room.players.values()].filter(
+      (p) => p.connected && p.id !== room.round.drawerId,
+    ).length;
+    track('turn_ended', {
+      roomCode: room.code,
+      playerId: room.round.drawerId,
+      data: {
+        reason,
+        word: solution,
+        custom: room.active?.custom ?? false,
+        guessers,
+        solved: room.round.guessedPlayerIds.length,
+        strokes: room.strokes.length,
+      },
+    });
     if (solution) {
       const why =
         reason === 'all-guessed' ? 'Everyone got it!'
@@ -600,8 +636,19 @@ export class RoundEngine {
     }
   }
 
-  private finish(room: Room): void {
+  private finish(room: Room, reason: 'completed' | 'abandoned' = 'completed'): void {
     this.advance(room);
+    track('game_finished', {
+      roomCode: room.code,
+      data: {
+        reason,
+        roundsPlayed: room.round.round,
+        roundsPlanned: room.settings.rounds,
+        players: room.players.size,
+        stillConnected: [...room.players.values()].filter((p) => p.connected).length,
+        topScore: Math.max(0, ...[...room.players.values()].map((p) => p.score)),
+      },
+    });
     room.round = {
       ...room.round,
       phase: 'finished',

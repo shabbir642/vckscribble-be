@@ -21,6 +21,8 @@ const LIMITS: Record<string, { perSecond: number; burst: number }> = {
   'word:custom': { perSecond: 2, burst: 8 },
   'room:create': { perSecond: 1, burst: 3 },
   'room:join': { perSecond: 2, burst: 5 },
+  // A render loop can throw continuously; record a trickle, drop the rest.
+  'client:error': { perSecond: 0.2, burst: 5 },
 };
 
 export function allow(socketId: string, event: string): boolean {

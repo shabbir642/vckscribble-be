@@ -14,6 +14,7 @@ import {
   undoStroke,
 } from './drawing.js';
 import { allow, forgetSocket } from './limits.js';
+import { track } from '../obs/events.js';
 import type { RoundEngine } from './round.js';
 import { StoreError, store } from './store.js';
 import type { PlayerRecord, Room } from './types.js';
@@ -49,6 +50,13 @@ function toFailure(e: unknown): Failure {
   console.error('[io] unhandled', e);
   return fail('INTERNAL', 'Something went wrong');
 }
+
+const ClientError = z.object({
+  source: z.enum(['render', 'window', 'promise', 'socket']),
+  message: z.string().min(1).max(500),
+  detail: z.string().max(2000).optional(),
+  url: z.string().max(500).optional(),
+});
 
 function systemMessage(text: string): ChatMessage {
   return {
@@ -88,6 +96,7 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       void socket.join(room.code);
       ack({ ok: true, roomCode: room.code, token: player.token });
       sendState(room, player);
+      track('room_created', { roomCode: room.code, playerId: player.id, playerName: name });
       io.to(room.code).emit('chat:message', systemMessage(`${name} created the room`));
     } catch (e) {
       ack(toFailure(e));
@@ -99,12 +108,28 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       const code = Code.parse(payload?.roomCode);
       const name = Name.parse(payload?.name);
       const avatar = Avatar.parse(payload?.avatar);
+      const before = (() => {
+        try {
+          return store.get(code).players.size;
+        } catch {
+          return -1;
+        }
+      })();
       const { room, player } = store.join(code, name, avatar, socket.id);
+      const reclaimed = room.players.size === before;
       void socket.join(room.code);
       ack({ ok: true, token: player.token });
       sendState(room, player);
       broadcastPlayers(room);
       if (room.strokes.length) socket.emit('draw:sync', { strokes: room.strokes });
+      // A reclaimed seat means someone came back without their token. A spike
+      // here is a sign the session is being lost, not that people are leaving.
+      track(reclaimed ? 'player_reclaimed_seat' : 'player_joined', {
+        roomCode: room.code,
+        playerId: player.id,
+        playerName: name,
+        data: { phase: room.round.phase, players: room.players.size },
+      });
       io.to(room.code).emit('chat:message', systemMessage(`${name} joined`));
     } catch (e) {
       ack(toFailure(e));
@@ -127,6 +152,12 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       }
       // ...and a returning drawer needs the word or the choices back.
       engine.resendTurnContext(room, player);
+      track('player_reconnected', {
+        roomCode: room.code,
+        playerId: player.id,
+        playerName: player.name,
+        data: { phase: room.round.phase, wasDrawer: room.round.drawerId === player.id },
+      });
     } catch (e) {
       ack(toFailure(e));
     }
@@ -185,7 +216,25 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       }
       const { room, player } = seatOf(socket);
       const text = z.string().min(1).max(60).parse(payload?.text);
-      engine.custom(room, player, text);
+      try {
+        engine.custom(room, player, text);
+      } catch (e) {
+        // Rejections are the interesting half: they are the filter getting in
+        // someone's way, which is invisible from the accepted ones alone.
+        track('custom_word', {
+          roomCode: room.code,
+          playerId: player.id,
+          playerName: player.name,
+          data: { accepted: false, text, reason: toFailure(e).code },
+        });
+        throw e;
+      }
+      track('custom_word', {
+        roomCode: room.code,
+        playerId: player.id,
+        playerName: player.name,
+        data: { accepted: true, text },
+      });
       ack({ ok: true });
     } catch (e) {
       ack(toFailure(e));
@@ -198,7 +247,17 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       z.string().max(200).parse(payload?.reason ?? '');
       if (room.active) {
         reportSuggestion(room.active.normalized);
-        console.warn(`[report] "${room.active.text}" in ${room.code}`);
+        const { player } = seatOf(socket);
+        track('word_reported', {
+          roomCode: room.code,
+          playerId: player.id,
+          playerName: player.name,
+          data: {
+            word: room.active.text,
+            custom: room.active.custom,
+            reason: String(payload?.reason ?? ''),
+          },
+        });
       }
       ack({ ok: true });
     } catch (e) {
@@ -260,6 +319,30 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
     }
   });
 
+  socket.on('client:error', (payload) => {
+    try {
+      if (!allow(socket.id, 'client:error')) return;
+      const body = ClientError.parse(payload);
+      let roomCode: string | null = null;
+      let player: PlayerRecord | null = null;
+      try {
+        const seat = seatOf(socket);
+        roomCode = seat.room.code;
+        player = seat.player;
+      } catch {
+        /* not seated yet — still worth recording */
+      }
+      track('client_error', {
+        roomCode,
+        playerId: player?.id ?? null,
+        playerName: player?.name ?? null,
+        data: { ...body, via: 'socket' },
+      });
+    } catch {
+      /* a broken error report must not become a second error */
+    }
+  });
+
   socket.on('disconnect', (reason) => {
     forgetSocket(socket.id);
     const res = store.disconnect(socket.id);
@@ -268,6 +351,12 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
     broadcastPlayers(room);
     io.to(room.code).emit('chat:message', systemMessage(`${player.name} disconnected`));
     engine.playerLeft(room);
+    track('player_dropped', {
+      roomCode: room.code,
+      playerId: player.id,
+      playerName: player.name,
+      data: { reason, phase: room.round.phase, wasDrawer: room.round.drawerId === player.id },
+    });
     console.log(`[io] ${player.name} left ${room.code} (${reason})`);
   });
 }

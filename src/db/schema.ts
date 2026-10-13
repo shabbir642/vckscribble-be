@@ -69,3 +69,29 @@ export const suggestions = sqliteTable(
 export type Word = typeof words.$inferSelect;
 export type NewWord = typeof words.$inferInsert;
 export type Suggestion = typeof suggestions.$inferSelect;
+
+/**
+ * Behavioural events, so the game's pain points show up in a query instead of
+ * waiting for someone to complain. Deliberately denormalised and append-only:
+ * each row is a fact that was true when written, never updated, and read by
+ * hand with the same sqlite3 CLI used for the dictionary. Pruned by age in the
+ * sweeper — see `pruneEvents`.
+ */
+export const events = sqliteTable(
+  'events',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    at: integer('at')
+      .notNull()
+      .default(sql`(unixepoch())`),
+    type: text('type').notNull(),
+    roomCode: text('room_code'),
+    playerId: text('player_id'),
+    playerName: text('player_name'),
+    /** JSON. Shape varies by `type`; kept opaque so adding a field is free. */
+    data: text('data'),
+  },
+  (t) => [index('events_type_at_idx').on(t.type, t.at)],
+);
+
+export type GameEvent = typeof events.$inferSelect;

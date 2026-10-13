@@ -8,7 +8,7 @@
  * Keep this file dependency-free so both repos can consume it as-is.
  */
 
-export const CONTRACT_VERSION = 3;
+export const CONTRACT_VERSION = 4;
 
 /* ---------------------------------------------------------------- domain */
 
@@ -105,6 +105,17 @@ export interface WordChoice {
 /* ----------------------------------------------- client -> server events */
 
 export interface ClientToServerEvents {
+  /**
+   * Something broke in the browser. The server cannot see a client-side failure
+   * otherwise, which is how a total connection outage once looked like a
+   * perfectly healthy log.
+   */
+  'client:error': (p: {
+    source: 'render' | 'window' | 'promise' | 'socket';
+    message: string;
+    detail?: string;
+    url?: string;
+  }) => void;
   'room:create': (
     p: { name: string; avatar: number },
     ack: (r: Result<{ roomCode: string; token: string }>) => void,
