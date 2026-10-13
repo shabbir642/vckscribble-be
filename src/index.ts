@@ -93,6 +93,22 @@ const sweeper = setInterval(() => {
 }, 30_000);
 sweeper.unref();
 
+/**
+ * A port collision is otherwise easy to miss: the old process keeps serving,
+ * so the app still answers and only behaves as if the new configuration were
+ * ignored — because it is. Say so plainly and stop.
+ */
+httpServer.on('error', (e: NodeJS.ErrnoException) => {
+  if (e.code === 'EADDRINUSE') {
+    console.error(
+      `[http] port ${PORT} is already in use — another server is still running ` +
+        `and will keep answering with ITS configuration, not this one. Stop it first.`,
+    );
+    process.exit(1);
+  }
+  throw e;
+});
+
 httpServer.listen(PORT, () => {
   console.log(`[http] listening on :${PORT} — client origin ${CLIENT_ORIGIN.join(', ')}`);
   if (!process.env.WORDS_API_TOKEN) {
