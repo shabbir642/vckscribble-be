@@ -35,6 +35,12 @@ const b = await connect();
 const bState = next(b, 'room:state');
 await emit(b, 'room:join', { roomCode: code, name: 'Ben', avatar: 1 });
 await bState;
+// Three players, so dropping the drawer below still leaves a playable game —
+// with two, the room now ends the game rather than passing the turn.
+const c = await connect();
+const cState = next(c, 'room:state');
+await emit(c, 'room:join', { roomCode: code, name: 'Cal', avatar: 2 });
+await cState;
 
 // short timers so the test runs quickly
 await emit(a, 'room:settings', { rounds: 1, drawSeconds: 30, selectSeconds: 30 });
@@ -82,7 +88,8 @@ check('non-drawer cannot draw during round', await (async () => {
 // --- custom word path, next turn -------------------------------------------
 a.emit('draw:clear', {});
 const bOptions = next(b, 'word:options', 40000);
-// end Ann's turn early by disconnecting the drawer
+// End Ann's turn early by disconnecting the drawer. The room waits out a
+// grace period first, in case she is only refreshing.
 a.disconnect();
 const bOpts = await bOptions;
 check('turn passes to the next drawer', bOpts.choices.length === 3);
@@ -98,6 +105,6 @@ const bAssigned = next(b, 'word:assigned');
 check('custom word accepted', (await emit(b, 'word:custom', { text: 'Quarterly Synergy Review' })).ok === true);
 check('custom word becomes the solution', (await bAssigned).text === 'Quarterly Synergy Review');
 
-b.disconnect();
+b.disconnect(); c.disconnect();
 console.log(`\n${pass} passed, ${failures.length} failed`);
 if (failures.length) { console.log('failed:', failures.join('; ')); process.exit(1); }

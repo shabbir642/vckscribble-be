@@ -32,6 +32,10 @@ const GUESS_BASE = 60;
 const GUESS_BONUS = 240;
 /** The drawer earns per person who gets it — drawing clearly beats drawing cryptically. */
 const DRAWER_PER_GUESS = 50;
+/** Ceiling on a drawer's take from one turn, just under a guesser's best. */
+const DRAWER_MAX_PER_TURN = 250;
+/** How long a departed player has to come back before the room acts on it. */
+const DEPARTURE_GRACE_MS = 10_000;
 
 /**
  * Owns phase transitions and every timer. All timing is server-side: clients
@@ -40,6 +44,15 @@ const DRAWER_PER_GUESS = 50;
  */
 export class RoundEngine {
   private timers = new Map<string, NodeJS.Timeout[]>();
+  /**
+   * Roster checks are held apart from the phase timers deliberately. `advance`
+   * clears those on every transition and `later` ties them to a `seq` snapshot,
+   * which is right for "finish this turn in 30s" and wrong for "did the room
+   * empty out?" — that question outlives whatever the round does next. One
+   * pending check per room is enough, since it re-reads live state when it
+   * fires.
+   */
+  private rosterChecks = new Map<string, NodeJS.Timeout>();
 
   constructor(private io: IO) {}
 
@@ -148,7 +161,7 @@ export class RoundEngine {
       this.finish(room);
       return;
     }
-    room.offered = choices.map((c) => ({ id: c.id, text: c.text }));
+    room.offered = choices;
 
     const endsAt = Date.now() + room.settings.selectSeconds * 1000;
     room.round = {
@@ -233,6 +246,7 @@ export class RoundEngine {
     room.active = active;
     room.offered = [];
     room.revealed = [];
+    room.drawerEarned = 0;
     if (!active.custom) {
       room.usedWordIds.push(active.wordId!);
       markDrawn(active.wordId);
@@ -358,7 +372,15 @@ export class RoundEngine {
     };
 
     const drawer = room.round.drawerId ? room.players.get(room.round.drawerId) : null;
-    if (drawer) drawer.score += DRAWER_PER_GUESS;
+    if (drawer) {
+      // Uncapped, this pays the drawer 50 per guesser, so in a ten-player room
+      // one turn is worth more than a guesser can score all game and turn order
+      // quietly decides the winner.
+      const headroom = Math.max(0, DRAWER_MAX_PER_TURN - room.drawerEarned);
+      const earned = Math.min(DRAWER_PER_GUESS, headroom);
+      drawer.score += earned;
+      room.drawerEarned += earned;
+    }
 
     // Stats feed the retirement query — see PLAN.md §7a.
     if (room.active?.custom) markSuggestionGuessed(room.active.normalized);
@@ -409,6 +431,85 @@ export class RoundEngine {
       const eligible =
         p.id === room.round.drawerId || room.round.guessedPlayerIds.includes(p.id);
       if (eligible) this.socketOf(p)?.emit('chat:message', m);
+    }
+  }
+
+  /**
+   * Re-send whatever the round had already pushed to this player privately.
+   * `room:state` carries the public view, so a reconnecting drawer gets the
+   * mask like everyone else and is left drawing a word they can no longer see —
+   * or, mid-selection, with no choices to pick from. Refreshing the page is the
+   * first thing a confused player does, so this path has to be whole.
+   */
+  resendTurnContext(room: Room, player: PlayerRecord): void {
+    if (room.round.drawerId !== player.id) return;
+    const socket = this.socketOf(player);
+    if (!socket) return;
+
+    if (room.round.phase === 'drawing' && room.active) {
+      socket.emit('word:assigned', { text: room.active.text });
+    } else if (room.round.phase === 'selecting' && room.offered.length) {
+      socket.emit('word:options', {
+        choices: room.offered,
+        allowCustom:
+          room.settings.allowCustomWords &&
+          (room.customCounts[player.id] ?? 0) < MAX_CUSTOM_PER_GAME,
+      });
+    }
+  }
+
+  /**
+   * Someone left. Re-check after a grace period rather than immediately,
+   * because a page refresh reaches the server as exactly this event — acting on
+   * it at once meant a drawer who refreshed killed their own turn before they
+   * could come back, and in a two-player room ended the whole game.
+   */
+  playerLeft(room: Room): void {
+    const phase = room.round.phase;
+    if (phase === 'lobby' || phase === 'finished') return;
+    if (this.rosterChecks.has(room.code)) return;
+    const t = setTimeout(() => {
+      this.rosterChecks.delete(room.code);
+      try {
+        this.reevaluate(room);
+      } catch (e) {
+        console.error('[round] roster check failed', e);
+      }
+    }, DEPARTURE_GRACE_MS);
+    this.rosterChecks.set(room.code, t);
+  }
+
+  /**
+   * Every rule about whether a turn or a game should still be running hangs off
+   * an event that a departure does not fire — `award` decides "everyone has
+   * guessed", `startGame` decides "enough players". Without re-checking here,
+   * the room keeps running a turn nobody is left to finish.
+   *
+   */
+  private reevaluate(room: Room): void {
+    const phase = room.round.phase;
+    if (phase === 'lobby' || phase === 'finished') return;
+
+    const connected = [...room.players.values()].filter((p) => p.connected);
+    if (connected.length < 2) {
+      this.system(room, 'Not enough players left — ending the game.');
+      this.finish(room);
+      return;
+    }
+
+    const drawer = room.round.drawerId ? room.players.get(room.round.drawerId) : null;
+    if ((phase === 'selecting' || phase === 'drawing') && !drawer?.connected) {
+      this.endTurn(room, 'drawer-left');
+      return;
+    }
+
+    if (phase === 'drawing') {
+      const pending = connected.filter(
+        (p) =>
+          p.id !== room.round.drawerId &&
+          !room.round.guessedPlayerIds.includes(p.id),
+      );
+      if (pending.length === 0) this.endTurn(room, 'all-guessed');
     }
   }
 
@@ -539,6 +640,9 @@ export class RoundEngine {
   dispose(code: string): void {
     for (const t of this.timers.get(code) ?? []) clearTimeout(t);
     this.timers.delete(code);
+    const pending = this.rosterChecks.get(code);
+    if (pending) clearTimeout(pending);
+    this.rosterChecks.delete(code);
   }
 }
 

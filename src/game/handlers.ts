@@ -125,6 +125,8 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       if (room.strokes.length) {
         socket.emit('draw:sync', { strokes: room.strokes });
       }
+      // ...and a returning drawer needs the word or the choices back.
+      engine.resendTurnContext(room, player);
     } catch (e) {
       ack(toFailure(e));
     }
@@ -265,12 +267,7 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
     const { room, player } = res;
     broadcastPlayers(room);
     io.to(room.code).emit('chat:message', systemMessage(`${player.name} disconnected`));
-    if (
-      room.round.drawerId === player.id &&
-      (room.round.phase === 'selecting' || room.round.phase === 'drawing')
-    ) {
-      engine.endTurn(room, 'drawer-left');
-    }
+    engine.playerLeft(room);
     console.log(`[io] ${player.name} left ${room.code} (${reason})`);
   });
 }

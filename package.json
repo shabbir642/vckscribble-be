@@ -18,8 +18,9 @@
     "smoke": "node scripts/smoke.mjs",
     "smoke:game": "node scripts/smoke-game.mjs",
     "smoke:guess": "node scripts/smoke-guess.mjs",
-    "smoke:all": "node scripts/smoke.mjs && node scripts/smoke-game.mjs && node scripts/smoke-guess.mjs && node scripts/smoke-join.mjs",
-    "smoke:join": "node scripts/smoke-join.mjs"
+    "smoke:all": "node scripts/smoke.mjs && node scripts/smoke-game.mjs && node scripts/smoke-guess.mjs && node scripts/smoke-join.mjs && node scripts/smoke-roster.mjs",
+    "smoke:join": "node scripts/smoke-join.mjs",
+    "smoke:roster": "node scripts/smoke-roster.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^11.7.0",

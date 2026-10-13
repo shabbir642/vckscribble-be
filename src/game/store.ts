@@ -70,6 +70,7 @@ export class RoomStore {
       offered: [],
       revealed: [],
       customCounts: {},
+      drawerEarned: 0,
     };
     this.rooms.set(code, room);
     const player = this.addPlayer(room, name, avatar, socketId);
@@ -85,11 +86,39 @@ export class RoomStore {
     socketId: string,
   ): { room: Room; player: PlayerRecord } {
     const room = this.get(code);
-    if (room.players.size >= room.settings.maxPlayers) {
+
+    /*
+     * Seats are deliberately kept for the whole game so scores survive a drop,
+     * which means an abandoned seat holds its name and its place in the count.
+     * Someone coming back without their token — cleared storage, another
+     * browser, another device — would otherwise be locked out of their own name
+     * for the rest of the game, in a room that reports itself full.
+     *
+     * Treat a name match on a disconnected seat as that player returning and
+     * hand the seat back. Knowing the room code and the name is the whole of
+     * the check: enough for a party game among people who were invited, and
+     * worth stating plainly rather than leaving implied.
+     */
+    const ghost = [...room.players.values()].find(
+      (p) => !p.connected && p.name.toLowerCase() === name.toLowerCase(),
+    );
+    if (ghost) {
+      if (ghost.socketId) this.bySocket.delete(ghost.socketId);
+      ghost.socketId = socketId;
+      ghost.connected = true;
+      ghost.avatar = avatar;
+      ghost.lastSeen = Date.now();
+      room.lastActivity = Date.now();
+      this.bySocket.set(socketId, { code: room.code, playerId: ghost.id });
+      return { room, player: ghost };
+    }
+
+    const present = [...room.players.values()].filter((p) => p.connected).length;
+    if (present >= room.settings.maxPlayers) {
       throw new StoreError('ROOM_FULL', 'That room is full');
     }
     const taken = [...room.players.values()].some(
-      (p) => p.name.toLowerCase() === name.toLowerCase(),
+      (p) => p.connected && p.name.toLowerCase() === name.toLowerCase(),
     );
     if (taken) throw new StoreError('NAME_TAKEN', 'That name is taken in this room');
     const player = this.addPlayer(room, name, avatar, socketId);
