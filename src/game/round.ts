@@ -435,8 +435,34 @@ export class RoundEngine {
     this.later(room, REVEAL_MS, () => this.nextTurn(room));
   }
 
+  /**
+   * The draw order is snapshotted when the game starts, so a player who joins
+   * afterwards is simply absent from it and would sit out every round of the
+   * game. Fold newcomers in at the back of the queue between turns: appending
+   * cannot disturb `turnIndex`, which makes it safe mid-round, and it means a
+   * late arrival draws in the round they joined rather than waiting one out.
+   */
+  private admitNewcomers(room: Room): void {
+    const queued = new Set(room.drawOrder);
+    for (const id of room.order) {
+      if (!queued.has(id)) room.drawOrder.push(id);
+    }
+  }
+
+  /**
+   * Rebuild the queue from the live roster, dropping anyone who left for good.
+   * Only safe at a round boundary, where `turnIndex` resets anyway — removing
+   * an entry mid-round shifts every later slot and would change who draws next.
+   * Players who are merely disconnected keep their slot; they may be back
+   * before it comes round, and `beginSelection` skips them if not.
+   */
+  private rebuildDrawOrder(room: Room): void {
+    room.drawOrder = room.order.filter((id) => room.players.has(id));
+  }
+
   private nextTurn(room: Room): void {
     this.advance(room);
+    this.admitNewcomers(room);
     room.turnIndex++;
     if (room.turnIndex < room.drawOrder.length) {
       this.beginSelection(room);
@@ -444,6 +470,7 @@ export class RoundEngine {
     }
     // Everyone has drawn once: that is one round.
     room.turnIndex = 0;
+    this.rebuildDrawOrder(room);
     if (room.round.round >= room.settings.rounds) {
       this.showScoreboard(room, true);
       return;
