@@ -50,17 +50,5 @@ export function ensureSchema(): void {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS suggestions_normalized_idx ON suggestions (normalized);
 
-    CREATE TABLE IF NOT EXISTS events (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      at INTEGER NOT NULL DEFAULT (unixepoch()),
-      type TEXT NOT NULL,
-      room_code TEXT,
-      player_id TEXT,
-      player_name TEXT,
-      data TEXT
-    );
-    CREATE INDEX IF NOT EXISTS events_type_at_idx ON events (type, at);
-    CREATE INDEX IF NOT EXISTS events_at_idx ON events (at);
-    CREATE INDEX IF NOT EXISTS events_room_idx ON events (room_code, at);
   `);
 }

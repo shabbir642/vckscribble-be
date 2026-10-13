@@ -1,6 +1,5 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { track } from '../obs/events.js';
 
 const Body = z.object({
   source: z.enum(['render', 'window', 'promise', 'socket']),
@@ -51,12 +50,10 @@ export function clientLogRouter(): Router {
       res.status(400).json({ ok: false });
       return;
     }
-    const { roomCode, playerName, ...rest } = parsed.data;
-    track('client_error', {
-      roomCode: roomCode ?? null,
-      playerName: playerName ?? null,
-      data: { ...rest, via: 'beacon', ua: String(req.headers['user-agent'] ?? '').slice(0, 200) },
-    });
+    const { roomCode, playerName, source, message } = parsed.data;
+    console.warn(
+      `[client] ${source} from ${playerName ?? 'anon'}@${roomCode ?? '-'}: ${message}`,
+    );
     res.json({ ok: true });
   });
   return r;

@@ -10,7 +10,6 @@ import { CONTRACT_VERSION } from './contract/index.js';
 import { ensureSchema, sqlite } from './db/index.js';
 import { seedWords } from './db/seed.js';
 import { clientLogRouter } from './http/clientLog.js';
-import { pruneEvents, recentCounts } from './obs/events.js';
 import { wordsRouter } from './http/words.js';
 import { registerHandlers } from './game/handlers.js';
 import { RoundEngine } from './game/round.js';
@@ -50,9 +49,6 @@ app.get('/api/health', (_req, res) => {
     contractVersion: CONTRACT_VERSION,
     enabledWords: c,
     rooms: store.size,
-    // Last day's activity, so a glance at health shows whether anything is
-    // happening and whether clients are erroring.
-    events24h: recentCounts(24),
   });
 });
 
@@ -99,16 +95,6 @@ const sweeper = setInterval(() => {
 }, 30_000);
 sweeper.unref();
 
-/**
- * Events answer "is the game frustrating people lately", so old ones are just
- * weight on a small volume. Hourly is often enough for a 30-day window.
- */
-const EVENT_RETENTION_DAYS = Number(process.env.EVENT_RETENTION_DAYS ?? 30);
-const pruner = setInterval(() => {
-  const removed = pruneEvents(EVENT_RETENTION_DAYS);
-  if (removed) console.log(`[events] pruned ${removed} older than ${EVENT_RETENTION_DAYS}d`);
-}, 3_600_000);
-pruner.unref();
 
 /**
  * A port collision is otherwise easy to miss: the old process keeps serving,

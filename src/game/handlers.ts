@@ -14,7 +14,6 @@ import {
   undoStroke,
 } from './drawing.js';
 import { allow, forgetSocket } from './limits.js';
-import { track } from '../obs/events.js';
 import type { RoundEngine } from './round.js';
 import { StoreError, store } from './store.js';
 import type { PlayerRecord, Room } from './types.js';
@@ -96,7 +95,6 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       void socket.join(room.code);
       ack({ ok: true, roomCode: room.code, token: player.token });
       sendState(room, player);
-      track('room_created', { roomCode: room.code, playerId: player.id, playerName: name });
       io.to(room.code).emit('chat:message', systemMessage(`${name} created the room`));
     } catch (e) {
       ack(toFailure(e));
@@ -108,28 +106,12 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       const code = Code.parse(payload?.roomCode);
       const name = Name.parse(payload?.name);
       const avatar = Avatar.parse(payload?.avatar);
-      const before = (() => {
-        try {
-          return store.get(code).players.size;
-        } catch {
-          return -1;
-        }
-      })();
       const { room, player } = store.join(code, name, avatar, socket.id);
-      const reclaimed = room.players.size === before;
       void socket.join(room.code);
       ack({ ok: true, token: player.token });
       sendState(room, player);
       broadcastPlayers(room);
       if (room.strokes.length) socket.emit('draw:sync', { strokes: room.strokes });
-      // A reclaimed seat means someone came back without their token. A spike
-      // here is a sign the session is being lost, not that people are leaving.
-      track(reclaimed ? 'player_reclaimed_seat' : 'player_joined', {
-        roomCode: room.code,
-        playerId: player.id,
-        playerName: name,
-        data: { phase: room.round.phase, players: room.players.size },
-      });
       io.to(room.code).emit('chat:message', systemMessage(`${name} joined`));
     } catch (e) {
       ack(toFailure(e));
@@ -152,12 +134,6 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       }
       // ...and a returning drawer needs the word or the choices back.
       engine.resendTurnContext(room, player);
-      track('player_reconnected', {
-        roomCode: room.code,
-        playerId: player.id,
-        playerName: player.name,
-        data: { phase: room.round.phase, wasDrawer: room.round.drawerId === player.id },
-      });
     } catch (e) {
       ack(toFailure(e));
     }
@@ -221,20 +197,8 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       } catch (e) {
         // Rejections are the interesting half: they are the filter getting in
         // someone's way, which is invisible from the accepted ones alone.
-        track('custom_word', {
-          roomCode: room.code,
-          playerId: player.id,
-          playerName: player.name,
-          data: { accepted: false, text, reason: toFailure(e).code },
-        });
         throw e;
       }
-      track('custom_word', {
-        roomCode: room.code,
-        playerId: player.id,
-        playerName: player.name,
-        data: { accepted: true, text },
-      });
       ack({ ok: true });
     } catch (e) {
       ack(toFailure(e));
@@ -248,16 +212,6 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       if (room.active) {
         reportSuggestion(room.active.normalized);
         const { player } = seatOf(socket);
-        track('word_reported', {
-          roomCode: room.code,
-          playerId: player.id,
-          playerName: player.name,
-          data: {
-            word: room.active.text,
-            custom: room.active.custom,
-            reason: String(payload?.reason ?? ''),
-          },
-        });
       }
       ack({ ok: true });
     } catch (e) {
@@ -319,25 +273,23 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
     }
   });
 
+  /**
+   * A browser-side failure, logged and nothing more. The server cannot see one
+   * otherwise: a connection that never establishes leaves the backend log
+   * perfectly clean while every player stares at a broken page.
+   */
   socket.on('client:error', (payload) => {
     try {
       if (!allow(socket.id, 'client:error')) return;
       const body = ClientError.parse(payload);
-      let roomCode: string | null = null;
-      let player: PlayerRecord | null = null;
+      let who = 'unseated';
       try {
         const seat = seatOf(socket);
-        roomCode = seat.room.code;
-        player = seat.player;
+        who = `${seat.player.name}@${seat.room.code}`;
       } catch {
-        /* not seated yet — still worth recording */
+        /* reported before joining a room — still worth printing */
       }
-      track('client_error', {
-        roomCode,
-        playerId: player?.id ?? null,
-        playerName: player?.name ?? null,
-        data: { ...body, via: 'socket' },
-      });
+      console.warn(`[client] ${body.source} from ${who}: ${body.message}`);
     } catch {
       /* a broken error report must not become a second error */
     }
@@ -351,12 +303,6 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
     broadcastPlayers(room);
     io.to(room.code).emit('chat:message', systemMessage(`${player.name} disconnected`));
     engine.playerLeft(room);
-    track('player_dropped', {
-      roomCode: room.code,
-      playerId: player.id,
-      playerName: player.name,
-      data: { reason, phase: room.round.phase, wasDrawer: room.round.drawerId === player.id },
-    });
     console.log(`[io] ${player.name} left ${room.code} (${reason})`);
   });
 }

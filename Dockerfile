@@ -16,12 +16,13 @@ FROM node:22-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 # Runs as the image's existing non-root user.
-RUN mkdir -p /data && chown node:node /data
+# Database lives in /tmp: it is rebuilt from the seed at every boot, so it
+# needs no volume and no ownership fixing.
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/package.json ./
 USER node
-ENV DATABASE_URL=/data/game.db
+ENV DATABASE_URL=/tmp/game.db
 ENV PORT=8080
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s \
