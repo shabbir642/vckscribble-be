@@ -130,7 +130,7 @@ together — the frontend and backend share a protocol version.
 ## Keeping an eye on it
 
 - **Uptime alerts.** `.github/workflows/uptime.yml` checks the home page, the
-  health endpoint, server lag and the game socket every 5 minutes from
+  health endpoint, server lag and the game socket every 2 hours from
   GitHub. When the site is down it opens an issue labelled `outage`, which
   emails everyone watching the repo and the people it @mentions
   (`ALERT_MENTIONS`), and closes it when the site is back. Run it by hand from

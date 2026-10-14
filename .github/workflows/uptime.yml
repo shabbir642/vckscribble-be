@@ -1,15 +1,17 @@
-# Checks https://vmock.fun from outside every 5 minutes. When it is down, an
+# Checks https://vmock.fun from outside every 2 hours. When it is down, an
 # issue labelled "outage" is opened (GitHub emails everyone watching the repo,
 # and the people in ALERT_MENTIONS); when it recovers, the issue is closed.
 #
-# GitHub runs schedules on a best-effort basis: expect a check every 5-15
-# minutes, not to the second. It also pauses scheduled workflows in a public
+# Every 2 hours rather than every few minutes by choice: the server's own
+# watchdog (deploy/watchdog.sh) already restarts a stuck stack within minutes,
+# so this is the backstop that tells people. GitHub runs schedules on a
+# best-effort basis, so a check can start some minutes late. It also pauses scheduled workflows in a public
 # repo after 60 days without commits; re-enable from the Actions tab if so.
 name: Uptime
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '0 */2 * * *'
   workflow_dispatch:
 
 permissions:
