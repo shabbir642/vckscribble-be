@@ -115,7 +115,26 @@ container that crashes), and clears old images when the disk fills up:
 (crontab -l 2>/dev/null; echo "* * * * * /opt/vmock-skribble/vckscribble-be/deploy/watchdog.sh >> /var/log/vmock-watchdog.log 2>&1") | crontab -
 ```
 
+## 8. Auto-deploy
+
+```bash
+(crontab -l 2>/dev/null; echo "* * * * * /opt/vmock-skribble/vckscribble-be/deploy/autodeploy.sh >> /var/log/vmock-deploy.log 2>&1") | crontab -
+```
+
 ## Updating
+
+Push to `main`. Within a minute of CI passing, the server deploys it
+(`deploy/autodeploy.sh`). It holds off while:
+
+- CI is still running, or failed — a red build is never deployed;
+- the two repos disagree on `CONTRACT_VERSION` — push the other half and it
+  deploys both together.
+
+If the new version fails to build or comes up unhealthy, it rolls back to
+what was running and skips that commit; push a fix to try again. Watch it
+with `tail -f /var/log/vmock-deploy.log` on the server.
+
+To deploy by hand instead:
 
 ```bash
 cd /opt/vmock-skribble
