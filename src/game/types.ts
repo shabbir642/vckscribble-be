@@ -63,4 +63,17 @@ export interface Room {
   drawerEarned: number;
   /** Players who reported the current word; one report each per turn. */
   reportedBy: Set<string>;
+  /** The host's custom word list. Never broadcast — guessers would see it. */
+  customWords: string[];
+  /** Indices into `customWords` already drawn this game. */
+  usedCustom: Set<number>;
+  /** Normalized text of every word drawn this game, from any source. */
+  drawn: Set<string>;
+  /**
+   * This turn's hints as data — which letter, at what time — rather than only
+   * as timers, so a restored room can re-arm the ones still to come.
+   */
+  hintPlan: { idx: number; at: number }[];
+  /** Whether the scoreboard on show is the last one (then the game ends). */
+  finalScoreboard: boolean;
 }

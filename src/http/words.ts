@@ -1,11 +1,13 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { normalizeWord } from '../contract/index.js';
-import { sqlite } from '../db/index.js';
+import { WORD_PACKS, normalizeWord, type WordPackId } from '../contract/index.js';
+import { sqlite, stmt } from '../db/index.js';
 
+const PACKS = WORD_PACKS.map((p) => p.id) as [WordPackId, ...WordPackId[]];
 const WordInput = z.object({
   text: z.string().trim().min(3).max(40),
   category: z.string().trim().max(32).default('owner'),
+  pack: z.enum(PACKS).default('slang'),
   drawability: z.union([z.literal(1), z.literal(2), z.literal(3)]).default(2),
 });
 
@@ -25,6 +27,11 @@ const Body = z.object({
 export function wordsRouter(): Router {
   const router = Router();
   const token = process.env.WORDS_API_TOKEN?.trim();
+  // Prepared once, not per request (see the note on statements in game/words.ts).
+  const insert = stmt(
+    `INSERT OR IGNORE INTO words (text, normalized, category, pack, drawability, source)
+     VALUES (?, ?, ?, ?, ?, 'owner')`,
+  );
 
   router.post('/words', (req, res) => {
     if (!token) {
@@ -47,14 +54,10 @@ export function wordsRouter(): Router {
       return;
     }
 
-    const stmt = sqlite.prepare(
-      `INSERT OR IGNORE INTO words (text, normalized, category, drawability, source)
-       VALUES (?, ?, ?, ?, 'owner')`,
-    );
     let inserted = 0;
     const run = sqlite.transaction((rows: z.infer<typeof WordInput>[]) => {
       for (const w of rows) {
-        inserted += stmt.run(w.text, normalizeWord(w.text), w.category, w.drawability).changes;
+        inserted += insert.run(w.text, normalizeWord(w.text), w.category, w.pack, w.drawability).changes;
       }
     });
     run(parsed.data.words);

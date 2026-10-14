@@ -20,6 +20,8 @@ export const words = sqliteTable(
     /** Normalized form — the uniqueness key, so "Circle Back" can't be re-added. */
     normalized: text('normalized').notNull(),
     category: text('category').notNull().default('general'),
+    /** The word pack a host can switch on or off (see WORD_PACKS). */
+    pack: text('pack').notNull().default('slang'),
     /**
      * 1 = draws itself, 3 = abstract. For corporate slang this tracks
      * DRAWABILITY, not obscurity — see PLAN.md §1. Correct it against

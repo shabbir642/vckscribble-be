@@ -1,5 +1,6 @@
 import { normalizeWord } from '../contract/index.js';
-import { sqlite } from './index.js';
+import { sqlite, stmt } from './index.js';
+import { packRows } from './packs.seed.js';
 import { SEED_WORDS } from './words.seed.js';
 
 export interface SeedReport {
@@ -14,21 +15,21 @@ export interface SeedReport {
  * entries to words.seed.ts is therefore always safe.
  */
 export function seedWords(): SeedReport {
-  const stmt = sqlite.prepare(
-    `INSERT OR IGNORE INTO words (text, normalized, category, drawability, source)
-     VALUES (?, ?, ?, ?, 'seed')`,
+  const insert = stmt(
+    `INSERT OR IGNORE INTO words (text, normalized, category, pack, drawability, source)
+     VALUES (?, ?, ?, ?, ?, 'seed')`,
   );
+  // Slang first: where a word appears twice, the first pack keeps it.
+  const rows: [string, string, string, number][] = [
+    ...SEED_WORDS.map(([text, category, d]) => [text, category, 'slang', d] as [string, string, string, number]),
+    ...packRows().map(([text, pack, d]) => [text, pack, pack, d] as [string, string, string, number]),
+  ];
   let inserted = 0;
   const run = sqlite.transaction(() => {
-    for (const [text, category, drawability] of SEED_WORDS) {
-      const r = stmt.run(text, normalizeWord(text), category, drawability);
-      inserted += r.changes;
+    for (const [text, category, pack, drawability] of rows) {
+      inserted += insert.run(text, normalizeWord(text), category, pack, drawability).changes;
     }
   });
   run();
-  return {
-    inserted,
-    skipped: SEED_WORDS.length - inserted,
-    total: SEED_WORDS.length,
-  };
+  return { inserted, skipped: rows.length - inserted, total: rows.length };
 }

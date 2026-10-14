@@ -8,12 +8,13 @@ import type {
   ServerToClientEvents,
 } from './contract/index.js';
 import { CONTRACT_VERSION } from './contract/index.js';
-import { ensureSchema, sqlite } from './db/index.js';
+import { ensureSchema, sqlite, stmt } from './db/index.js';
 import { seedWords } from './db/seed.js';
 import { clientLogRouter, sweepClientLog } from './http/clientLog.js';
 import { wordsRouter } from './http/words.js';
 import { registerHandlers } from './game/handlers.js';
 import { closeConnection, openConnection, sweepLimits } from './game/limits.js';
+import { ensureSnapshotTable, loadRooms, saveRooms } from './game/persist.js';
 import { RoundEngine } from './game/round.js';
 import { store } from './game/store.js';
 
@@ -53,7 +54,7 @@ const loopDelay = monitorEventLoopDelay({ resolution: LOOP_RESOLUTION_MS });
 loopDelay.enable();
 /** The histogram includes the sampling interval itself; report only the lag. */
 const lagMs = (ns: number) => Math.max(0, +(ns / 1e6 - LOOP_RESOLUTION_MS).toFixed(1));
-const enabledWords = sqlite.prepare('SELECT COUNT(*) AS c FROM words WHERE enabled = 1');
+const enabledWords = stmt('SELECT COUNT(*) AS c FROM words WHERE enabled = 1');
 
 app.get('/api/health', (_req, res) => {
   const { c } = enabledWords.get() as { c: number };
@@ -113,6 +114,22 @@ io.use((socket, next) => {
 });
 
 const engine = new RoundEngine(io);
+
+/**
+ * Games interrupted by the last shutdown pick up where they left off. The
+ * grace is generous because every client is reconnecting at once.
+ */
+const RESTORE_GRACE_MS = 30_000;
+ensureSnapshotTable();
+const restored = loadRooms();
+for (const { room, downtimeMs } of restored) {
+  store.adopt(room, RESTORE_GRACE_MS);
+  engine.resumeRoom(room, downtimeMs);
+  engine.playerLeft(room, RESTORE_GRACE_MS);
+}
+if (restored.length) {
+  console.log(`[restore] resumed ${restored.length} room(s) from the last shutdown`);
+}
 
 // A host who did not come back within their grace has handed the role on.
 store.onHostChange = (room) => {
@@ -183,6 +200,13 @@ httpServer.listen(PORT, () => {
  */
 function shutdown(signal: string): void {
   console.log(`[http] ${signal} — shutting down`);
+  // Before anything disconnects: the rooms as they stand right now.
+  try {
+    const saved = saveRooms(store.all());
+    if (saved) console.log(`[http] saved ${saved} room(s) to resume after restart`);
+  } catch (e) {
+    console.error('[http] could not save rooms', e);
+  }
   clearInterval(ticker);
   clearInterval(sweeper);
   io.close();

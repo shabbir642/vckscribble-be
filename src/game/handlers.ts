@@ -1,7 +1,10 @@
 import type { Server, Socket } from 'socket.io';
 import { z } from 'zod';
 import {
+  DRAW_TIMES,
   MAX_POINTS_PER_STROKE,
+  WORD_PACKS,
+  type WordPackId,
   type ChatMessage,
   type ClientToServerEvents,
   type Failure,
@@ -20,7 +23,7 @@ import { allow, forgetSocket } from './limits.js';
 import type { RoundEngine } from './round.js';
 import { StoreError, store } from './store.js';
 import type { PlayerRecord, Room } from './types.js';
-import { reportWord } from './words.js';
+import { parseCustomWords, reportWord } from './words.js';
 
 type IO = Server<ClientToServerEvents, ServerToClientEvents>;
 type Sock = Socket<ClientToServerEvents, ServerToClientEvents>;
@@ -31,15 +34,22 @@ const Code = z.string().trim().toUpperCase().min(4).max(6);
 /** Optional and untrusted: only ever compared for equality, never shown. */
 const DeviceId = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/).optional().catch(undefined);
 
+const PACK_IDS = WORD_PACKS.map((p) => p.id) as [WordPackId, ...WordPackId[]];
 const SettingsPatch = z
   .object({
     rounds: z.number().int().min(1).max(10),
-    drawSeconds: z.number().int().min(30).max(180),
+    drawSeconds: z.number().int().refine((n) => DRAW_TIMES.includes(n), 'Pick one of the listed draw times'),
     selectSeconds: z.number().int().min(5).max(60),
     maxPlayers: z.number().int().min(2).max(16),
     allowCustomWords: z.boolean(),
+    wordPacks: z.array(z.enum(PACK_IDS)).max(PACK_IDS.length).transform((a) => [...new Set(a)]),
+    difficulty: z.enum(['easy', 'mixed', 'hard']),
+    wordChoices: z.number().int().min(1).max(5),
+    hints: z.number().int().min(0).max(5),
+    customWordsOnly: z.boolean(),
   })
-  .partial();
+  .partial()
+  .strict();
 
 function fail(code: Failure['code'], message: string): Failure {
   return { ok: false, code, message };
@@ -89,6 +99,7 @@ export function emitStateToEach(io: IO, room: Room): void {
       settings: room.settings,
       round: room.round,
       you: { playerId: p.id },
+      ...(p.id === room.hostId ? { hostWords: room.customWords } : {}),
     });
   }
 }
@@ -104,6 +115,9 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       settings: room.settings,
       round: room.round,
       you: { playerId: player.id },
+      // The custom list goes to the host alone: anyone else would be
+      // reading the answers.
+      ...(player.id === room.hostId ? { hostWords: room.customWords } : {}),
     });
   };
   const broadcastPlayers = (room: Room) => {
@@ -217,9 +231,10 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       }
       const code = Code.parse(payload?.roomCode);
       const token = z.string().min(8).max(64).parse(payload?.token);
+      const takeover = z.boolean().optional().parse(payload?.takeover) ?? true;
       const current = store.seatOf(socket.id);
       if (current && current.room.code !== code) leaveCurrent();
-      const { room, player } = store.resume(code, token, socket.id);
+      const { room, player } = store.resume(code, token, socket.id, takeover);
       void socket.join(room.code);
       ack({ ok: true, playerId: player.id });
       sendState(room, player);
@@ -251,6 +266,29 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
     }
   });
 
+  socket.on('room:customWords', (payload, ack) => {
+    try {
+      if (!allow(socket.id, 'room:settings')) {
+        ack(fail('RATE_LIMITED', 'Slow down a moment'));
+        return;
+      }
+      const text = z.string().max(20_000).parse(payload?.text ?? '');
+      const { room, player } = seatOf(socket);
+      if (room.hostId !== player.id) {
+        throw new StoreError('NOT_HOST', 'Only the host can set custom words');
+      }
+      if (room.round.phase !== 'lobby' && room.round.phase !== 'finished') {
+        throw new StoreError('BAD_PHASE', 'Custom words are locked once the game starts');
+      }
+      const { words, rejected } = parseCustomWords(text);
+      store.setCustomWords(room, words);
+      ack({ ok: true, accepted: words.length, rejected });
+      emitStateToEach(io, room);
+    } catch (e) {
+      ack(toFailure(e));
+    }
+  });
+
   socket.on('room:start', (_payload, ack) => {
     try {
       const { room, player } = seatOf(socket);
@@ -263,12 +301,34 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
     }
   });
 
+  socket.on('room:restart', (_payload, ack) => {
+    try {
+      const { room, player } = seatOf(socket);
+      if (room.hostId !== player.id) {
+        throw new StoreError('NOT_HOST', 'Only the host can restart the game');
+      }
+      if (room.round.phase === 'lobby') {
+        throw new StoreError('BAD_PHASE', 'The game has not started yet');
+      }
+      const midGame = room.round.phase !== 'finished';
+      engine.reset(room);
+      ack({ ok: true });
+      io.to(room.code).emit(
+        'chat:message',
+        systemMessage(midGame ? `${player.name} restarted the game` : `${player.name} is setting up another game`),
+      );
+    } catch (e) {
+      ack(toFailure(e));
+    }
+  });
+
   /* ------------------------------------------------------- word choice */
 
   socket.on('word:choose', (payload, ack) => {
     try {
       const { room, player } = seatOf(socket);
-      const wordId = z.number().int().positive().parse(payload?.wordId);
+      // Dictionary words have positive ids; the host's custom words negative.
+      const wordId = z.number().int().refine((n) => n !== 0, 'Unknown word').parse(payload?.wordId);
       engine.choose(room, player, wordId);
       ack({ ok: true });
     } catch (e) {

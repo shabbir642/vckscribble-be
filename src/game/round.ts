@@ -4,7 +4,9 @@ import {
   type ChatTone,
   type ClientToServerEvents,
   type ServerToClientEvents,
+  type WordChoice,
   isCloseGuess,
+  isHintable,
   maskWord,
   normalizeWord,
 } from '../contract/index.js';
@@ -13,6 +15,7 @@ import { StoreError, store } from './store.js';
 import type { PlayerRecord, Room } from './types.js';
 import {
   acceptCustomWord,
+  customIndex,
   markDrawn,
   markGuessed,
   markSuggestionGuessed,
@@ -28,13 +31,24 @@ const SCOREBOARD_MS = 5000;
 /** A drawer may invent at most this many words per game. */
 const MAX_CUSTOM_PER_GAME = 3;
 
-/** Guessing is worth this at the buzzer, rising toward BASE+BONUS at full time. */
-const GUESS_BASE = 60;
-const GUESS_BONUS = 240;
-/** The drawer earns per person who gets it — drawing clearly beats drawing cryptically. */
-const DRAWER_PER_GUESS = 50;
-/** Ceiling on a drawer's take from one turn, just under a guesser's best. */
-const DRAWER_MAX_PER_TURN = 250;
+/**
+ * Scoring. A guess is worth GUESS_BASE at the buzzer, rising to
+ * GUESS_BASE + GUESS_SPEED for an instant answer, plus a bonus for being
+ * among the first to get it — so racing matters, not just the clock.
+ */
+const GUESS_BASE = 50;
+const GUESS_SPEED = 250;
+const ORDER_BONUS = [50, 30, 15];
+/**
+ * The drawer earns a share of DRAWER_TURN_POINTS for each player who gets it:
+ * everyone guessing pays the full amount whether the room has 2 guessers or
+ * 12. A flat amount per guess (as before) made a drawer in a big room worth
+ * five times one in a small room, so turn order decided games.
+ */
+const DRAWER_TURN_POINTS = 250;
+/** Hints appear between these fractions of the drawing time. */
+const HINTS_FROM = 0.35;
+const HINTS_UNTIL = 0.85;
 /** How long a departed player has to come back before the room acts on it. */
 const DEPARTURE_GRACE_MS = 10_000;
 
@@ -121,9 +135,12 @@ export class RoundEngine {
 
   startGame(room: Room): void {
     this.advance(room);
-    room.drawOrder = room.order.filter((id) => room.players.get(id)?.connected);
+    // Shuffled: join order meant the host always drew first, every game.
+    room.drawOrder = shuffle(room.order.filter((id) => room.players.get(id)?.connected));
     room.turnIndex = 0;
     room.usedWordIds = [];
+    room.usedCustom = new Set();
+    room.drawn = new Set();
     room.customCounts = {};
     room.round = {
       ...room.round,
@@ -146,6 +163,7 @@ export class RoundEngine {
     this.advance(room);
     clearStrokes(room);
     room.revealed = [];
+    room.hintPlan = [];
     room.active = null;
     room.reportedBy.clear();
     this.io.to(room.code).emit('draw:clear', {});
@@ -157,7 +175,15 @@ export class RoundEngine {
       return;
     }
 
-    const choices = pickChoices(room.usedWordIds);
+    const choices = pickChoices({
+      packs: room.settings.wordPacks,
+      difficulty: room.settings.difficulty,
+      count: room.settings.wordChoices,
+      usedIds: room.usedWordIds,
+      custom: room.customWords,
+      usedCustom: room.usedCustom,
+      customOnly: room.settings.customWordsOnly,
+    });
     if (!choices.length) {
       this.system(room, 'The dictionary is out of unused words — ending the game.');
       this.finish(room);
@@ -186,16 +212,16 @@ export class RoundEngine {
     });
 
     // One stalled drawer must not freeze the room.
-    this.later(room, room.settings.selectSeconds * 1000, () => {
-      const pick = choices[Math.floor(Math.random() * choices.length)]!;
-      this.system(room, `${drawer.name} took too long — picked for them.`);
-      this.beginDrawing(room, {
-        wordId: pick.id,
-        text: pick.text,
-        normalized: normalizeWord(pick.text),
-        custom: false,
-      });
-    });
+    this.later(room, room.settings.selectSeconds * 1000, () => this.autoPick(room));
+  }
+
+  /** The drawer ran out of time to choose: pick one of the offers for them. */
+  private autoPick(room: Room): void {
+    const pick = room.offered[Math.floor(Math.random() * room.offered.length)];
+    if (!pick) return this.nextTurn(room);
+    const drawer = this.currentDrawer(room);
+    this.system(room, `${drawer?.name ?? 'The drawer'} took too long — picked for them.`);
+    this.beginDrawing(room, this.activeFrom(room, pick));
   }
 
   choose(room: Room, player: PlayerRecord, wordId: number): void {
@@ -203,14 +229,23 @@ export class RoundEngine {
     if (!room.offered.some((o) => o.id === wordId)) {
       throw new StoreError('INVALID', 'That word was not offered');
     }
-    const word = wordById(wordId);
-    if (!word) throw new StoreError('INVALID', 'That word is no longer available');
-    this.beginDrawing(room, {
-      wordId: word.id,
-      text: word.text,
-      normalized: normalizeWord(word.text),
-      custom: false,
-    });
+    const offered = room.offered.find((o) => o.id === wordId)!;
+    if (wordId > 0 && !wordById(wordId)) {
+      throw new StoreError('INVALID', 'That word is no longer available');
+    }
+    this.beginDrawing(room, this.activeFrom(room, offered));
+  }
+
+  /**
+   * An offered choice as the turn's word. Negative ids are entries of the
+   * host's custom list: no dictionary row, so they are tracked per room.
+   */
+  private activeFrom(room: Room, choice: WordChoice): NonNullable<Room['active']> {
+    if (choice.id < 0) {
+      room.usedCustom.add(customIndex(choice.id));
+      return { wordId: null, text: choice.text, normalized: normalizeWord(choice.text), custom: true };
+    }
+    return { wordId: choice.id, text: choice.text, normalized: normalizeWord(choice.text), custom: false };
   }
 
   /** Requirement 1: the drawer writes their own instead of taking an offer. */
@@ -224,6 +259,9 @@ export class RoundEngine {
       throw new StoreError('RATE_LIMITED', `Only ${MAX_CUSTOM_PER_GAME} custom words per game`);
     }
     const clean = acceptCustomWord(text, player.id, room.code);
+    if (room.drawn.has(normalizeWord(clean))) {
+      throw new StoreError('INVALID', 'That word was already drawn this game — pick another');
+    }
     room.customCounts[player.id] = used + 1;
     this.beginDrawing(room, {
       wordId: null,
@@ -245,12 +283,20 @@ export class RoundEngine {
   private beginDrawing(room: Room, active: Room['active']): void {
     if (!active) return;
     this.advance(room);
+    // Words offered but passed over are spent too: being offered the same
+    // three words again two turns later felt like a broken shuffle.
+    for (const o of room.offered) {
+      if (o.id > 0 && !room.usedWordIds.includes(o.id)) room.usedWordIds.push(o.id);
+      else if (o.id < 0) room.usedCustom.add(customIndex(o.id));
+    }
     room.active = active;
     room.offered = [];
     room.revealed = [];
+    room.hintPlan = [];
     room.drawerEarned = 0;
+    room.drawn.add(active.normalized);
     if (!active.custom) {
-      room.usedWordIds.push(active.wordId!);
+      if (!room.usedWordIds.includes(active.wordId!)) room.usedWordIds.push(active.wordId!);
       markDrawn(active.wordId);
     }
 
@@ -273,45 +319,92 @@ export class RoundEngine {
   }
 
   /**
-   * Letters appear as the clock drains, capped at ~35% of non-space characters
-   * and spread across every word in the phrase — front-loading the first word
-   * of "circle back" would give away far more than a third of it.
+   * Letters appear as the clock drains: up to the room's hint setting, spread
+   * evenly between HINTS_FROM and HINTS_UNTIL of the turn.
+   *
+   * Never more than half of any word, so no word in a phrase is ever handed
+   * over whole, and round-robin across the words — front-loading the first
+   * word of "circle back" would give away far more than its share. Only
+   * letters and digits are hints; punctuation is visible from the start.
    */
   private scheduleHints(room: Room, text: string, totalMs: number): void {
-    const indices = [...text].map((c, i) => (c === ' ' ? -1 : i)).filter((i) => i >= 0);
-    const budget = Math.floor(indices.length * 0.35);
+    const words: number[][] = [];
+    let current: number[] = [];
+    [...text].forEach((ch, i) => {
+      if (ch === ' ') {
+        if (current.length) words.push(current);
+        current = [];
+      } else if (isHintable(ch)) {
+        current.push(i);
+      }
+    });
+    if (current.length) words.push(current);
+
+    // Each word keeps at least half its letters hidden.
+    const queues = words.map((w) => shuffle(w).slice(0, Math.floor(w.length / 2)));
+    const available = queues.reduce((n, q) => n + q.length, 0);
+    const budget = Math.min(room.settings.hints, available);
     if (budget <= 0) return;
 
-    const perWord = new Map<number, number[]>();
-    let word = 0;
-    for (let i = 0; i < text.length; i++) {
-      if (text[i] === ' ') { word++; continue; }
-      const list = perWord.get(word) ?? [];
-      list.push(i);
-      perWord.set(word, list);
-    }
-    // Round-robin across words so every word thaws at a similar rate.
-    const queues = [...perWord.values()].map((l) => shuffle(l));
     const order: number[] = [];
     for (let i = 0; order.length < budget; i++) {
-      let progressed = false;
       for (const q of queues) {
-        if (i < q.length) { order.push(q[i]!); progressed = true; }
-        if (order.length >= budget) break;
+        if (i < q.length && order.length < budget) order.push(q[i]!);
       }
-      if (!progressed) break;
     }
 
-    const firstAt = totalMs * 0.45;
-    const gap = (totalMs * 0.45) / Math.max(1, order.length);
-    order.forEach((idx, n) => {
-      this.later(room, firstAt + gap * n, () => {
-        room.revealed.push(idx);
-        const masked = maskWord(text, new Set(room.revealed));
-        room.round = { ...room.round, maskedWord: masked };
-        this.io.to(room.code).emit('round:hint', { maskedWord: masked });
-      });
+    const span = HINTS_UNTIL - HINTS_FROM;
+    const start = Date.now();
+    room.hintPlan = order.map((idx, n) => ({
+      idx,
+      at: start + totalMs * (HINTS_FROM + (span * (n + 1)) / (budget + 1)),
+    }));
+    for (const h of room.hintPlan) this.armHint(room, h.idx, h.at - start);
+  }
+
+  private armHint(room: Room, idx: number, delay: number): void {
+    this.later(room, Math.max(0, delay), () => {
+      const text = room.active?.text;
+      if (!text || room.revealed.includes(idx)) return;
+      room.revealed.push(idx);
+      const masked = maskWord(text, new Set(room.revealed));
+      room.round = { ...room.round, maskedWord: masked };
+      this.io.to(room.code).emit('round:hint', { maskedWord: masked });
     });
+  }
+
+  /**
+   * Picks a restored room back up after a server restart. Every deadline moves
+   * by the downtime — the game was paused, not running unattended — and the
+   * timers for the current phase are re-armed from the room's own state.
+   */
+  resumeRoom(room: Room, downtimeMs: number): void {
+    const now = Date.now();
+    if (room.round.endsAt) room.round = { ...room.round, endsAt: room.round.endsAt + downtimeMs };
+    room.hintPlan = room.hintPlan.map((h) => ({ ...h, at: h.at + downtimeMs }));
+    const left = Math.max(1000, (room.round.endsAt ?? now) - now);
+
+    switch (room.round.phase) {
+      case 'selecting':
+        this.later(room, left, () => this.autoPick(room));
+        break;
+      case 'drawing':
+        for (const h of room.hintPlan) {
+          if (!room.revealed.includes(h.idx)) this.armHint(room, h.idx, h.at - now);
+        }
+        this.later(room, left, () => this.endTurn(room, 'time'));
+        break;
+      case 'reveal':
+        this.later(room, left, () => this.nextTurn(room));
+        break;
+      case 'scoreboard':
+        this.later(room, left, () =>
+          room.finalScoreboard ? this.finish(room) : this.beginSelection(room),
+        );
+        break;
+      default:
+        break; // lobby and finished have no clock
+    }
   }
 
   /* ----------------------------------------------------------- guessing */
@@ -367,7 +460,8 @@ export class RoundEngine {
     const left = Math.max(0, (room.round.endsAt ?? 0) - Date.now());
     const frac = total > 0 ? Math.min(1, left / total) : 0;
 
-    player.score += Math.round(GUESS_BASE + GUESS_BONUS * frac);
+    const place = room.round.guessedPlayerIds.length; // 0 = first to get it
+    player.score += guessPoints(frac, place);
     room.round = {
       ...room.round,
       guessedPlayerIds: [...room.round.guessedPlayerIds, player.id],
@@ -375,11 +469,12 @@ export class RoundEngine {
 
     const drawer = room.round.drawerId ? room.players.get(room.round.drawerId) : null;
     if (drawer) {
-      // Uncapped, this pays the drawer 50 per guesser, so in a ten-player room
-      // one turn is worth more than a guesser can score all game and turn order
-      // quietly decides the winner.
-      const headroom = Math.max(0, DRAWER_MAX_PER_TURN - room.drawerEarned);
-      const earned = Math.min(DRAWER_PER_GUESS, headroom);
+      // A share per guesser, sized to the room, capped at the full amount.
+      const guessers = [...room.players.values()].filter(
+        (p) => p.connected && p.id !== drawer.id,
+      ).length;
+      const share = Math.round(DRAWER_TURN_POINTS / Math.max(1, guessers));
+      const earned = Math.min(share, Math.max(0, DRAWER_TURN_POINTS - room.drawerEarned));
       drawer.score += earned;
       room.drawerEarned += earned;
     }
@@ -466,7 +561,7 @@ export class RoundEngine {
    * it at once meant a drawer who refreshed killed their own turn before they
    * could come back, and in a two-player room ended the whole game.
    */
-  playerLeft(room: Room): void {
+  playerLeft(room: Room, graceMs = DEPARTURE_GRACE_MS): void {
     const phase = room.round.phase;
     if (phase === 'lobby' || phase === 'finished') return;
     if (this.rosterChecks.has(room.code)) return;
@@ -477,7 +572,7 @@ export class RoundEngine {
       } catch (e) {
         console.error('[round] roster check failed', e);
       }
-    }, DEPARTURE_GRACE_MS);
+    }, graceMs);
     this.rosterChecks.set(room.code, t);
   }
 
@@ -587,6 +682,7 @@ export class RoundEngine {
 
   private showScoreboard(room: Room, final: boolean): void {
     this.advance(room);
+    room.finalScoreboard = final;
     room.round = {
       ...room.round,
       phase: 'scoreboard',
@@ -622,9 +718,12 @@ export class RoundEngine {
     });
   }
 
-  /** Back to lobby, e.g. the host wants another game. */
+  /** Back to lobby: the host restarted, mid-game or from the podium. */
   reset(room: Room): void {
     this.advance(room);
+    const pending = this.rosterChecks.get(room.code);
+    if (pending) clearTimeout(pending);
+    this.rosterChecks.delete(room.code);
     room.round = {
       phase: 'lobby',
       round: 0,
@@ -636,8 +735,12 @@ export class RoundEngine {
       guessedPlayerIds: [],
     };
     room.active = null;
+    room.offered = [];
+    room.revealed = [];
     clearStrokes(room);
+    for (const p of room.players.values()) p.score = 0;
     this.publish(room);
+    this.sendPlayers(room);
     this.io.to(room.code).emit('draw:clear', {});
   }
 
@@ -649,6 +752,12 @@ export class RoundEngine {
     if (pending) clearTimeout(pending);
     this.rosterChecks.delete(code);
   }
+}
+
+/** Points for a correct guess: speed, plus a bonus for the first few to get it. */
+export function guessPoints(timeLeftFraction: number, place: number): number {
+  const f = Math.min(1, Math.max(0, timeLeftFraction));
+  return Math.round(GUESS_BASE + GUESS_SPEED * f) + (ORDER_BONUS[place] ?? 0);
 }
 
 function shuffle<T>(arr: T[]): T[] {

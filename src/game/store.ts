@@ -1,5 +1,6 @@
 import {
   DEFAULT_SETTINGS,
+  MIN_CUSTOM_WORDS,
   type ErrorCode,
   type Player,
   type RoomPreview,
@@ -46,6 +47,15 @@ export class RoomStore {
   private rooms = new Map<string, Room>();
   /** socketId -> (roomCode, playerId), so disconnects resolve in O(1). */
   private bySocket = new Map<string, { code: string; playerId: string }>();
+  /**
+   * Takes back a room restored from a snapshot. Its host gets a longer grace
+   * than a refresh would: every client is reconnecting at once.
+   */
+  adopt(room: Room, hostGraceMs: number): void {
+    this.rooms.set(room.code, room);
+    if (room.hostId) this.scheduleHandoff(room, room.hostId, hostGraceMs);
+  }
+
   /** Pending host hand-offs, one per room, for hosts within their grace. */
   private hostHandoffs = new Map<string, NodeJS.Timeout>();
   /** Called when the host changes outside any client request (grace expiry). */
@@ -96,6 +106,11 @@ export class RoomStore {
       customCounts: {},
       drawerEarned: 0,
       reportedBy: new Set(),
+      customWords: [],
+      usedCustom: new Set(),
+      drawn: new Set(),
+      hintPlan: [],
+      finalScoreboard: false,
     };
     this.rooms.set(code, room);
     const player = this.addPlayer(room, name, avatar, socketId, deviceId);
@@ -197,10 +212,14 @@ export class RoomStore {
     code: string,
     token: string,
     socketId: string,
+    takeover = true,
   ): { room: Room; player: PlayerRecord } {
     const room = this.get(code);
     const player = [...room.players.values()].find((p) => p.token === token);
     if (!player) throw new StoreError('INVALID', 'Unknown session for that room');
+    if (!takeover && player.connected && player.socketId && player.socketId !== socketId) {
+      throw new StoreError('SEAT_IN_USE', 'That seat is open in another tab');
+    }
     if (player.socketId && player.socketId !== socketId) {
       this.bySocket.delete(player.socketId);
     }
@@ -241,7 +260,7 @@ export class RoomStore {
   }
 
   /** After the grace, a host who has not come back passes the role on. */
-  private scheduleHandoff(room: Room, hostId: string): void {
+  private scheduleHandoff(room: Room, hostId: string, graceMs = HOST_GRACE_MS): void {
     this.cancelHandoff(room.code);
     const t = setTimeout(() => {
       this.hostHandoffs.delete(room.code);
@@ -249,7 +268,7 @@ export class RoomStore {
       if (room.hostId !== hostId || room.players.get(hostId)?.connected) return;
       this.reassignHost(room);
       this.onHostChange?.(room);
-    }, HOST_GRACE_MS);
+    }, graceMs);
     t.unref();
     this.hostHandoffs.set(room.code, t);
   }
@@ -299,6 +318,14 @@ export class RoomStore {
     this.setHost(room, next ?? null);
   }
 
+  /** The host's list; only its size is public (settings.customWordCount). */
+  setCustomWords(room: Room, words: string[]): void {
+    room.customWords = words;
+    room.usedCustom = new Set();
+    room.settings = { ...room.settings, customWordCount: words.length };
+    room.lastActivity = Date.now();
+  }
+
   updateSettings(
     room: Room,
     actorId: string,
@@ -310,7 +337,9 @@ export class RoomStore {
     if (room.round.phase !== 'lobby') {
       throw new StoreError('BAD_PHASE', 'Settings are locked once the game starts');
     }
-    room.settings = { ...room.settings, ...patch };
+    // customWordCount follows the list itself, never a client's claim.
+    const { customWordCount: _ignored, ...rest } = patch;
+    room.settings = { ...room.settings, ...rest };
     room.round.totalRounds = room.settings.rounds;
     room.lastActivity = Date.now();
     return room.settings;
@@ -360,6 +389,16 @@ export class RoomStore {
     const present = [...room.players.values()].filter((p) => p.connected).length;
     if (present < 2) {
       throw new StoreError('INVALID', 'Need at least 2 players to start');
+    }
+    const s = room.settings;
+    if (s.customWordsOnly && room.customWords.length < MIN_CUSTOM_WORDS) {
+      throw new StoreError(
+        'INVALID',
+        `Add at least ${MIN_CUSTOM_WORDS} custom words, or turn off "custom words only"`,
+      );
+    }
+    if (!s.customWordsOnly && s.wordPacks.length === 0) {
+      throw new StoreError('INVALID', 'Pick at least one word pack');
     }
   }
 

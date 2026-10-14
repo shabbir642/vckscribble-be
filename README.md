@@ -80,7 +80,17 @@ always a playable game.
 In the VPS deployment the file lives on the `game-data` Docker volume, so word
 statistics, words added through `POST /api/words`, player-invented words and
 reports all survive restarts and redeploys — the curation queries above work
-on real history. Rooms and games are in memory and do not survive a restart.
+on real history.
+
+Rooms live in memory while the server runs, but a graceful stop (SIGTERM —
+what `docker compose up` sends when it replaces the container) writes every
+room to the `room_snapshots` table first, and the next boot restores them with
+every deadline shifted by the downtime. Players' clients reconnect and resume
+on their own: a deploy mid-game is a pause of a few seconds. A hard crash
+(`kill -9`, power loss) skips the shutdown hook, so those games are lost.
+
+better-sqlite3 must stay on 13+: 11.x and 12.x crash on Node 24.19+ when a
+prepared statement is garbage-collected (nodejs/node#65446).
 
 Inspect it on the server with:
 
@@ -132,8 +142,8 @@ ports 80 and 443 (e.g. `ufw allow 80,443/tcp && ufw allow 443/udp`). Without a
 domain yet, set `DOMAIN=:80` and `CLIENT_ORIGIN=http://<server-ip>`.
 
 **Updating:** `git pull` in both repos, then `docker compose up -d --build`.
-Games in progress end (rooms are in memory); clients return to the home screen
-and say so. Deploy between sessions.
+Games in progress pause for the few seconds the swap takes and then carry on
+(see Storage). Keep `stop_grace_period` long enough for the save to finish.
 
 Rooms are held in memory, so a second backend process would not see the
 first's rooms — scale up (a faster CPU), not out.

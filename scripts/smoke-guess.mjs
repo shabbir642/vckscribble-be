@@ -8,6 +8,11 @@ const check = (l, c, d = '') => { if (c) { pass++; console.log(`  ✓ ${l}`); } 
 const connect = () => new Promise((res, rej) => { const s = io(URL, { transports: ['websocket'], forceNew: true }); s.once('connect', () => res(s)); s.once('connect_error', rej); });
 const emit = (s, ev, p) => new Promise((r) => s.emit(ev, p, r));
 const next = (s, ev, ms = 6000) => new Promise((res, rej) => { const t = setTimeout(() => rej(new Error(`timeout: ${ev}`)), ms); s.once(ev, (p) => { clearTimeout(t); res(p); }); });
+/** Resolves with whichever socket is offered words: turn order is shuffled. */
+const firstOffer = (socks, ms = 6000) => new Promise((res, rej) => {
+  const t = setTimeout(() => rej(new Error('timeout: word:options')), ms);
+  for (const sock of socks) sock.once('word:options', (p) => { clearTimeout(t); res({ sock, ...p }); });
+});
 /** Waits for the first matching event — intermediate ones are expected. */
 const until = (s, ev, pred, ms = 8000) => new Promise((res, rej) => {
   const t = setTimeout(() => { s.off(ev, h); rej(new Error(`timeout: ${ev}`)); }, ms);
@@ -19,23 +24,28 @@ const collect = (s, ev, ms) => new Promise((res) => { const out = []; const h = 
 console.log(`\nM5 guessing & scoring — ${URL}\n`);
 
 // room:state follows the ack immediately, so listeners go on first.
-const drawer = await connect();
-const dState = next(drawer, 'room:state');
-const { roomCode: code } = await emit(drawer, 'room:create', { name: 'Dee', avatar: 0 });
-await dState;
-const g1 = await connect();
-const g1State = next(g1, 'room:state');
-await emit(g1, 'room:join', { roomCode: code, name: 'Gus', avatar: 1 });
-await g1State;
-const g2 = await connect();
-const g2State = next(g2, 'room:state');
-await emit(g2, 'room:join', { roomCode: code, name: 'Hal', avatar: 2 });
-await g2State;
+const host = await connect();
+host.name = 'Dee';
+const hState = next(host, 'room:state');
+const { roomCode: code } = await emit(host, 'room:create', { name: 'Dee', avatar: 0 });
+await hState;
+const p1 = await connect();
+p1.name = 'Gus';
+const p1State = next(p1, 'room:state');
+await emit(p1, 'room:join', { roomCode: code, name: 'Gus', avatar: 1 });
+await p1State;
+const p2 = await connect();
+p2.name = 'Hal';
+const p2State = next(p2, 'room:state');
+await emit(p2, 'room:join', { roomCode: code, name: 'Hal', avatar: 2 });
+await p2State;
 
-await emit(drawer, 'room:settings', { rounds: 1, drawSeconds: 60, selectSeconds: 20 });
-const opts = next(drawer, 'word:options');
-await emit(drawer, 'room:start', {});
-const { choices } = await opts;
+await emit(host, 'room:settings', { rounds: 1, drawSeconds: 60, selectSeconds: 20 });
+// Turn order is shuffled: whoever is offered words is the drawer.
+const offer = firstOffer([host, p1, p2]);
+await emit(host, 'room:start', {});
+const { sock: drawer, choices } = await offer;
+const [g1, g2] = [host, p1, p2].filter((s) => s !== drawer);
 // Listeners must be registered BEFORE the emit that triggers them.
 const assigned = next(drawer, 'word:assigned');
 const drawingState = next(g1, 'round:state');
@@ -68,11 +78,11 @@ const scored = next(g2, 'room:players');
 g1.emit('chat:guess', { text: solution.toUpperCase() });
 const sysMsg = await sys;
 check('correct guess announced without revealing word',
-  sysMsg.channel === 'system' && sysMsg.text.includes('Gus') && !sysMsg.text.includes(solution));
+  sysMsg.channel === 'system' && sysMsg.text.includes(g1.name) && !sysMsg.text.includes(solution));
 check('correct guess is toned for the client', sysMsg.tone === 'correct', `tone=${sysMsg.tone}`);
 const players = (await scored).players;
-const gus = players.find(p => p.name === 'Gus');
-const dee = players.find(p => p.name === 'Dee');
+const gus = players.find(p => p.name === g1.name);
+const dee = players.find(p => p.name === drawer.name);
 check('guesser scored', gus.score > 0, `score=${gus.score}`);
 check('drawer scored for the guess', dee.score > 0, `score=${dee.score}`);
 check('case-insensitive matching', gus.score > 0);

@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import Database from 'better-sqlite3';
+import Database, { type Statement } from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import * as schema from './schema.js';
 
@@ -20,6 +20,23 @@ sqlite.pragma('synchronous = NORMAL');
 sqlite.pragma('foreign_keys = ON');
 
 export const db = drizzle(sqlite, { schema });
+
+/**
+ * Every statement in the app goes through here: compiled once per SQL text
+ * and kept for the life of the process. That is cheaper, and it is required —
+ * a statement that gets garbage-collected crashes better-sqlite3 11 on
+ * Node 24 (`RemoveEnvironmentCleanupHook: (env) != nullptr`). So SQL text must
+ * be fixed, never built per call; pass lists as JSON and use json_each.
+ */
+const statements = new Map<string, Statement<unknown[]>>();
+export function stmt(sql: string): Statement<unknown[]> {
+  let s = statements.get(sql);
+  if (!s) {
+    s = sqlite.prepare(sql);
+    statements.set(sql, s);
+  }
+  return s;
+}
 export { schema };
 
 /**
@@ -35,6 +52,7 @@ export function ensureSchema(): void {
       text TEXT NOT NULL,
       normalized TEXT NOT NULL,
       category TEXT NOT NULL DEFAULT 'general',
+      pack TEXT NOT NULL DEFAULT 'slang',
       drawability INTEGER NOT NULL DEFAULT 2,
       enabled INTEGER NOT NULL DEFAULT 1,
       source TEXT NOT NULL DEFAULT 'seed',
@@ -59,9 +77,16 @@ export function ensureSchema(): void {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS suggestions_normalized_idx ON suggestions (normalized);
   `);
-  // Databases created before `words.reported` existed (a volume, a dev file).
-  const cols = sqlite.prepare('PRAGMA table_info(words)').all() as { name: string }[];
+  // Databases created before these columns existed (a volume, a dev file).
+  // Every word predating packs was corporate slang, hence the default.
+  const cols = stmt('PRAGMA table_info(words)').all() as { name: string }[];
   if (!cols.some((c) => c.name === 'reported')) {
     sqlite.exec('ALTER TABLE words ADD COLUMN reported INTEGER NOT NULL DEFAULT 0');
   }
+  if (!cols.some((c) => c.name === 'pack')) {
+    sqlite.exec(`ALTER TABLE words ADD COLUMN pack TEXT NOT NULL DEFAULT 'slang'`);
+  }
+  sqlite.exec(
+    'CREATE INDEX IF NOT EXISTS words_pack_idx ON words (enabled, pack, drawability)',
+  );
 }

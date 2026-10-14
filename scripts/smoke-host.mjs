@@ -117,6 +117,24 @@ console.log(`\nHost role — ${URL}\n`);
   back.s.close();
 }
 
+// 6. Restart: host only, not before a game, and back to a clean lobby.
+{
+  const h = await room('Pia');
+  const g = await joinAs(h.code, 'Quin');
+  check('cannot restart before the game starts', (await emit(h.s, 'room:restart', {})).code === 'BAD_PHASE');
+  await emit(h.s, 'room:start', {});
+  await sleep(300);
+  check('guest cannot restart', (await emit(g.s, 'room:restart', {})).code === 'NOT_HOST');
+  const back = new Promise((res) => g.s.on('round:state', (r) => r.phase === 'lobby' && res(r)));
+  check('host restarts mid-game', (await emit(h.s, 'room:restart', {})).ok === true);
+  const r = await Promise.race([back, sleep(2000).then(() => null)]);
+  check('everyone is back in the lobby', r?.phase === 'lobby' && r.round === 0, JSON.stringify(r));
+  await sleep(200);
+  check('scores are reset', g.latest.players.every((p) => p.score === 0));
+  check('a new game can start', (await emit(h.s, 'room:start', {})).ok === true);
+  h.s.close(); g.s.close();
+}
+
 console.log(`\n${pass} passed, ${failures.length} failed`);
 if (failures.length) { console.log('failed:', failures.join('; ')); process.exit(1); }
 process.exit(0);

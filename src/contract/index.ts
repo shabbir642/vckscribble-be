@@ -8,7 +8,7 @@
  * Keep this file dependency-free so both repos can consume it as-is.
  */
 
-export const CONTRACT_VERSION = 6;
+export const CONTRACT_VERSION = 8;
 
 /* ---------------------------------------------------------------- domain */
 
@@ -56,12 +56,51 @@ export interface Stroke {
   points: number[];
 }
 
+/* ------------------------------------------------------------ word packs */
+
+export type WordPackId =
+  | 'everyday' | 'animals' | 'food' | 'office' | 'actions' | 'places'
+  | 'nature' | 'sports' | 'tech' | 'jobs' | 'fantasy' | 'slang';
+
+/** What a host can pick from, in display order. */
+export const WORD_PACKS: { id: WordPackId; label: string; emoji: string }[] = [
+  { id: 'everyday', label: 'Everyday things', emoji: '🧦' },
+  { id: 'animals', label: 'Animals', emoji: '🐼' },
+  { id: 'food', label: 'Food & drink', emoji: '🍕' },
+  { id: 'office', label: 'Office stuff', emoji: '📎' },
+  { id: 'actions', label: 'Actions', emoji: '🤸' },
+  { id: 'places', label: 'Places', emoji: '🏰' },
+  { id: 'nature', label: 'Nature & weather', emoji: '🌋' },
+  { id: 'sports', label: 'Sports & games', emoji: '⚽' },
+  { id: 'tech', label: 'Tech & gadgets', emoji: '💻' },
+  { id: 'jobs', label: 'Jobs & people', emoji: '👩‍🚒' },
+  { id: 'fantasy', label: 'Fantasy & fun', emoji: '🦄' },
+  { id: 'slang', label: 'Corporate slang', emoji: '💼' },
+];
+
+/**
+ * Easy: words that draw themselves (cat, pizza). Mixed: mostly easy, some
+ * medium. Hard: anything goes, including the abstract (synergy).
+ */
+export type WordDifficulty = 'easy' | 'mixed' | 'hard';
+
 export interface RoomSettings {
   rounds: number;
   drawSeconds: number;
   selectSeconds: number;
   maxPlayers: number;
+  /** The drawer may write their own word instead of picking one. */
   allowCustomWords: boolean;
+  wordPacks: WordPackId[];
+  difficulty: WordDifficulty;
+  /** How many words the drawer chooses between. */
+  wordChoices: number;
+  /** Most letters revealed as hints during a turn (0 = no hints). */
+  hints: number;
+  /** Draw only from the host's custom word list. */
+  customWordsOnly: boolean;
+  /** How many custom words the host has added. The words stay with the host. */
+  customWordCount: number;
 }
 
 export const DEFAULT_SETTINGS: RoomSettings = {
@@ -70,7 +109,19 @@ export const DEFAULT_SETTINGS: RoomSettings = {
   selectSeconds: 15,
   maxPlayers: 12,
   allowCustomWords: true,
+  wordPacks: ['everyday', 'animals', 'food', 'office', 'slang'],
+  difficulty: 'mixed',
+  wordChoices: 3,
+  hints: 3,
+  customWordsOnly: false,
+  customWordCount: 0,
 };
+
+/** Selectable draw times, in seconds. */
+export const DRAW_TIMES = [15, 20, 30, 40, 50, 60, 70, 80, 90, 100, 120, 150, 180, 210, 240];
+/** Custom-words-only needs at least this many, or games run dry fast. */
+export const MIN_CUSTOM_WORDS = 10;
+export const MAX_CUSTOM_WORDS = 500;
 
 /** Public round state. Never contains the solution while drawing is live. */
 export interface RoundState {
@@ -162,15 +213,36 @@ export interface ClientToServerEvents {
     ack: (r: Result<{ token: string }>) => void,
   ) => void;
 
+  /**
+   * `takeover: false` — this tab found the token in shared storage, not its
+   * own: if the seat is in use by another tab, leave it there (SEAT_IN_USE)
+   * rather than stealing it. A tab resuming its own seat (a refresh) takes it.
+   */
   'room:resume': (
-    p: { roomCode: string; token: string },
+    p: { roomCode: string; token: string; takeover?: boolean },
     ack: (r: Result<{ playerId: string }>) => void,
   ) => void;
 
-  'room:settings': (p: Partial<RoomSettings>, ack: Ack) => void;
+  'room:settings': (
+    p: Partial<Omit<RoomSettings, 'customWordCount'>>,
+    ack: Ack,
+  ) => void;
+  /**
+   * Host only: replace the room's custom word list (comma or newline
+   * separated). Invalid entries come back in `rejected`.
+   */
+  'room:customWords': (
+    p: { text: string },
+    ack: (r: Result<{ accepted: number; rejected: string[] }>) => void,
+  ) => void;
   /** Change your own name/avatar. Only before a game starts (lobby/finished). */
   'player:update': (p: { name?: string; avatar?: number }, ack: Ack) => void;
   'room:start': (p: Record<string, never>, ack: Ack) => void;
+  /**
+   * Host only: stop the game (or leave the final podium) and return everyone
+   * to the lobby, where settings and words can be changed again.
+   */
+  'room:restart': (p: Record<string, never>, ack: Ack) => void;
 
   /** Pick one of the three offered words. */
   'word:choose': (p: { wordId: number }, ack: Ack) => void;
@@ -200,6 +272,8 @@ export interface ServerToClientEvents {
     settings: RoomSettings;
     round: RoundState;
     you: { playerId: string };
+    /** The custom word list — sent to the host only, never to guessers. */
+    hostWords?: string[];
   }) => void;
 
   'room:players': (p: { players: Player[] }) => void;
@@ -242,6 +316,7 @@ export type ErrorCode =
   | 'WORD_BLOCKED'
   | 'WORD_RETIRED'
   | 'RATE_LIMITED'
+  | 'SEAT_IN_USE'
   | 'INVALID'
   | 'INTERNAL';
 
@@ -283,10 +358,17 @@ export function normalizeWord(input: string): string {
     .trim();
 }
 
-/** Structural mask: word count and lengths are given away for free. */
+/** A character a hint can reveal, and a guesser has to type. */
+export const isHintable = (ch: string): boolean => /[\p{L}\p{N}]/u.test(ch);
+
+/**
+ * Structural mask: word count and lengths are given away for free, and so is
+ * punctuation — "follow-up" shows its hyphen rather than reading as one
+ * nine-letter word.
+ */
 export function maskWord(word: string, revealed: Set<number> = new Set()): string {
   return [...word]
-    .map((ch, i) => (ch === ' ' ? '  ' : revealed.has(i) ? ch : '_'))
+    .map((ch, i) => (ch === ' ' ? '  ' : revealed.has(i) || !isHintable(ch) ? ch : '_'))
     .join(' ')
     .replace(/\s{4,}/g, '   ');
 }

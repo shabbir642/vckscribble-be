@@ -52,18 +52,27 @@ async function room(names, draw = 30) {
   return { code: created.roomCode, socks };
 }
 
+/**
+ * Starts the game from the host and returns the players drawer-first. Turn
+ * order is shuffled, so the scenarios below take their roles from position,
+ * not from who happened to join first.
+ */
+async function startDrawerFirst(socks) {
+  const offer = new Promise((res) => socks.forEach((p) => p.sock.once('word:options', () => res(p))));
+  await emit(socks[0].sock, 'room:start', {});
+  const drawer = await offer;
+  return [drawer, ...socks.filter((p) => p !== drawer)];
+}
+
 console.log(`\nRoster changes mid-game — ${URL}\n`);
 
 /* --- 1 & 2: a drawer who refreshes keeps their word / their choices ------- */
 {
   // A long draw clock, so an early reveal can only come from the roster check
   // and not from the turn simply timing out.
-  const { code, socks } = await room(['Ann', 'Ben', 'Cal'], 180);
+  const { code, socks: joined } = await room(['Ann', 'Ben', 'Cal'], 180);
+  const socks = await startDrawerFirst(joined);
   const [ann, ben] = socks;
-
-  const opts = next(ann.sock, 'word:options');
-  await emit(ann.sock, 'room:start', {});
-  await opts;
 
   // Refresh while still choosing.
   ann.sock.disconnect();
@@ -102,11 +111,8 @@ console.log(`\nRoster changes mid-game — ${URL}\n`);
 
 /* --- 4: the game stops when too few players remain ------------------------ */
 {
-  const { socks } = await room(['Dee', 'Eli']);
-  const [dee, eli] = socks;
-  const started = next(dee.sock, 'word:options');
-  await emit(dee.sock, 'room:start', {});
-  await started;
+  const { socks: joined } = await room(['Dee', 'Eli']);
+  const [dee, eli] = await startDrawerFirst(joined);
 
   const finished = maybe(until(dee.sock, 'round:state', (s) => s.phase === 'finished', 20000));
   eli.sock.disconnect();
@@ -116,25 +122,21 @@ console.log(`\nRoster changes mid-game — ${URL}\n`);
 
 /* --- 5: a returning player reclaims their seat and score ------------------ */
 {
-  const { code, socks } = await room(['Fay', 'Gil', 'Hal']);
-  const [fay, gil, hal] = socks;
-  const opts = next(fay.sock, 'word:options');
-  const assigned = next(fay.sock, 'word:assigned');
-  await emit(fay.sock, 'room:start', {});
-  await opts;
-  const word = (await assigned).text;
+  const { code, socks: joined } = await room(['Fay', 'Gil', 'Hal']);
+  const [fay, gil, hal] = await startDrawerFirst(joined);
+  const word = (await next(fay.sock, 'word:assigned', 12000)).text;
   await until(fay.sock, 'round:state', (s) => s.phase === 'drawing').catch(() => {});
 
   const scored = until(fay.sock, 'room:players',
-    (p) => (p.players.find((x) => x.name === 'Gil')?.score ?? 0) > 0);
+    (p) => (p.players.find((x) => x.name === gil.name)?.score ?? 0) > 0);
   gil.sock.emit('chat:guess', { text: word });
-  const before = (await scored).players.find((x) => x.name === 'Gil').score;
+  const before = (await scored).players.find((x) => x.name === gil.name).score;
 
   // Gil loses their token and rejoins by name alone.
   gil.sock.disconnect();
   await new Promise((r) => setTimeout(r, 300));
   const gil2 = await connect();
-  const back = await emit(gil2, 'room:join', { roomCode: code, name: 'Gil', avatar: 1 });
+  const back = await emit(gil2, 'room:join', { roomCode: code, name: gil.name, avatar: 1 });
   check('returning player is let back in under their own name', back.ok === true,
     JSON.stringify(back));
   const roster = await next(gil2, 'room:state');
@@ -142,7 +144,7 @@ console.log(`\nRoster changes mid-game — ${URL}\n`);
   check('returning player keeps their score', seat?.score === before,
     `${seat?.score} vs ${before}`);
   check('returning player does not become a duplicate',
-    roster.players.filter((x) => x.name === 'Gil').length === 1);
+    roster.players.filter((x) => x.name === gil.name).length === 1);
 
   fay.sock.disconnect(); gil2.disconnect(); hal.sock.disconnect();
 }
@@ -150,20 +152,17 @@ console.log(`\nRoster changes mid-game — ${URL}\n`);
 /* --- 6: the drawer's take from one turn is capped ------------------------- */
 {
   const names = ['Ivy', 'Jay', 'Kim', 'Lee', 'Max', 'Nan', 'Oli'];
-  const { socks } = await room(names);
+  const { socks: joined } = await room(names);
+  const socks = await startDrawerFirst(joined);
   const [ivy, ...rest] = socks;
-  const opts = next(ivy.sock, 'word:options');
-  const assigned = next(ivy.sock, 'word:assigned');
-  await emit(ivy.sock, 'room:start', {});
-  await opts;
-  const word = (await assigned).text;
+  const word = (await next(ivy.sock, 'word:assigned', 12000)).text;
   await until(ivy.sock, 'round:state', (s) => s.phase === 'drawing').catch(() => {});
 
   const allIn = until(ivy.sock, 'room:players',
-    (p) => p.players.filter((x) => x.score > 0 && x.name !== 'Ivy').length === 6, 12000);
+    (p) => p.players.filter((x) => x.score > 0 && x.name !== ivy.name).length === 6, 12000);
   for (const g of rest) g.sock.emit('chat:guess', { text: word });
   const final = await allIn;
-  const drawer = final.players.find((x) => x.name === 'Ivy');
+  const drawer = final.players.find((x) => x.name === ivy.name);
   check('drawer score is capped per turn', drawer.score <= 250,
     `6 guessers paid the drawer ${drawer.score}`);
   check('drawer still earns from the turn', drawer.score > 0);
