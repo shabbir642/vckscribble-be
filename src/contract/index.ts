@@ -8,7 +8,7 @@
  * Keep this file dependency-free so both repos can consume it as-is.
  */
 
-export const CONTRACT_VERSION = 10;
+export const CONTRACT_VERSION = 11;
 
 /* ---------------------------------------------------------------- domain */
 
@@ -118,7 +118,7 @@ export interface RoomSettings {
 
 export const DEFAULT_SETTINGS: RoomSettings = {
   rounds: 3,
-  drawSeconds: 80,
+  drawSeconds: 25,
   selectSeconds: 15,
   maxPlayers: 12,
   allowCustomWords: true,
@@ -131,7 +131,7 @@ export const DEFAULT_SETTINGS: RoomSettings = {
 };
 
 /** Selectable draw times, in seconds. */
-export const DRAW_TIMES = [15, 20, 30, 40, 50, 60, 70, 80, 90, 100, 120, 150, 180, 210, 240];
+export const DRAW_TIMES = [15, 20, 25, 30, 40, 50, 60, 70, 80, 90, 100, 120, 150, 180, 210, 240];
 /** Custom-words-only needs at least this many, or games run dry fast. */
 export const MIN_CUSTOM_WORDS = 10;
 export const MAX_CUSTOM_WORDS = 500;
