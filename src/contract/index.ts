@@ -8,7 +8,7 @@
  * Keep this file dependency-free so both repos can consume it as-is.
  */
 
-export const CONTRACT_VERSION = 9;
+export const CONTRACT_VERSION = 10;
 
 /* ---------------------------------------------------------------- domain */
 
@@ -31,6 +31,19 @@ export interface Player {
   score: number;
   connected: boolean;
   isHost: boolean;
+  /** Ids of the present players voting to kick this one. */
+  kickVotes: string[];
+}
+
+/**
+ * Votes needed to kick a player: a majority of everyone else present. A vote
+ * needs at least 3 players in the room, or one person could throw out the
+ * other; the host can kick outright in any room.
+ */
+export const MIN_PLAYERS_FOR_KICK_VOTE = 3;
+export function kickVotesNeeded(presentPlayers: number): number {
+  const others = presentPlayers - 1;
+  return Math.floor(others / 2) + 1;
 }
 
 /**
@@ -240,6 +253,15 @@ export interface ClientToServerEvents {
     p: { text: string },
     ack: (r: Result<{ accepted: number; rejected: string[] }>) => void,
   ) => void;
+  /**
+   * Kick a player. The host's request removes them at once; anyone else's is
+   * a vote (sending it again withdraws it), and a majority removes them. A
+   * kicked player cannot rejoin the room from the same browser.
+   */
+  'player:kick': (
+    p: { playerId: string },
+    ack: (r: Result<{ kicked: boolean; votes: number; needed: number }>) => void,
+  ) => void;
   /** Change your own name/avatar. Only before a game starts (lobby/finished). */
   'player:update': (p: { name?: string; avatar?: number }, ack: Ack) => void;
   'room:start': (p: Record<string, never>, ack: Ack) => void;
@@ -314,6 +336,8 @@ export interface ServerToClientEvents {
 
   'game:scores': (p: { players: Player[]; final: boolean }) => void;
   'error:toast': (p: { code: ErrorCode; message: string }) => void;
+  /** You were removed from the room; your seat is gone. */
+  'room:kicked': (p: { roomCode: string; by: 'host' | 'vote' }) => void;
 }
 
 /* --------------------------------------------------------------- results */
@@ -332,6 +356,7 @@ export type ErrorCode =
   | 'WORD_RETIRED'
   | 'RATE_LIMITED'
   | 'SEAT_IN_USE'
+  | 'KICKED'
   | 'INVALID'
   | 'INTERNAL';
 

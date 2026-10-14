@@ -75,6 +75,9 @@ export function loadRooms(now = Date.now()): { room: Room; downtimeMs: number }[
     try {
       const room = JSON.parse(row.data, reviver) as Room;
       room.strokeIndex = new Map(room.strokes.map((s) => [s.id, s]));
+      // Snapshots from before vote kicks existed.
+      room.kickVotes ??= new Map();
+      room.banned ??= new Set();
       for (const p of room.players.values()) {
         p.connected = false;
         p.socketId = null;

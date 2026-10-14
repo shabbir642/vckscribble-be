@@ -6,7 +6,7 @@ import type {
   Stroke,
 } from '../contract/index.js';
 
-export interface PlayerRecord extends Player {
+export interface PlayerRecord extends Omit<Player, 'kickVotes'> {
   /** Reconnect secret. Never leaves the server except to its own owner. */
   token: string;
   socketId: string | null;
@@ -78,4 +78,8 @@ export interface Room {
   hintPlan: { idx: number; at: number }[];
   /** Whether the scoreboard on show is the last one (then the game ends). */
   finalScoreboard: boolean;
+  /** target playerId -> ids of the players voting to kick them. */
+  kickVotes: Map<string, Set<string>>;
+  /** Device ids (and tokens) of kicked players, refused at the door. */
+  banned: Set<string>;
 }

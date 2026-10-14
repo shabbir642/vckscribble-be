@@ -1,0 +1,87 @@
+# Checks https://vmock.fun from outside every 5 minutes. When it is down, an
+# issue labelled "outage" is opened (GitHub emails everyone watching the repo,
+# and the people in ALERT_MENTIONS); when it recovers, the issue is closed.
+#
+# GitHub runs schedules on a best-effort basis: expect a check every 5-15
+# minutes, not to the second. It also pauses scheduled workflows in a public
+# repo after 60 days without commits; re-enable from the Actions tab if so.
+name: Uptime
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+concurrency:
+  group: uptime
+  cancel-in-progress: false
+
+env:
+  SITE: https://vmock.fun
+  ALERT_MENTIONS: '@Sagn1k @shabbir642'
+  # Event-loop lag (ms, p99) above which players feel it.
+  MAX_LAG_MS: 250
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe the site
+        id: probe
+        run: |
+          probe() {
+            local page health poll lag
+            page=$(curl -fsS --max-time 15 "$SITE/") || { echo "home page unreachable"; return 1; }
+            grep -q 'vmock skribble' <<<"$page" || { echo "home page served something unexpected"; return 1; }
+            health=$(curl -fsS --max-time 15 "$SITE/api/health") || { echo "/api/health unreachable"; return 1; }
+            [ "$(jq -r .ok <<<"$health" 2>/dev/null)" = true ] || { echo "/api/health is not answering as the game server"; return 1; }
+            lag=$(jq -r '.loopLagMs.p99 // 0' <<<"$health")
+            awk -v l="$lag" -v m="$MAX_LAG_MS" 'BEGIN { exit !(l <= m) }' || { echo "server lagging: p99 ${lag} ms"; return 1; }
+            poll=$(curl -fsS --max-time 15 "$SITE/socket.io/?EIO=4&transport=polling") || { echo "game socket unreachable"; return 1; }
+            [[ "$poll" == 0\{* ]] || { echo "game socket answered oddly"; return 1; }
+            echo "up: $(jq -c '{rooms, sockets, heapMb, p99: .loopLagMs.p99}' <<<"$health")"
+          }
+          # Three tries, 20 s apart: a deploy restarts the stack for a few
+          # seconds, and that is not an outage.
+          for i in 1 2 3; do
+            if out=$(probe); then
+              echo "$out"; echo "status=up" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            echo "attempt $i: $out"
+            [ "$i" -lt 3 ] && sleep 20
+          done
+          echo "status=down" >> "$GITHUB_OUTPUT"
+          echo "reason=$(tr '\n' ' ' <<<"$out" | head -c 300)" >> "$GITHUB_OUTPUT"
+
+      - name: Open or close the outage issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          STATUS: ${{ steps.probe.outputs.status }}
+          REASON: ${{ steps.probe.outputs.reason }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          now=$(date -u '+%Y-%m-%d %H:%M UTC')
+          open=$(gh issue list --label outage --state open --json number --jq '.[0].number // empty')
+          if [ "$STATUS" = down ]; then
+            if [ -n "$open" ]; then
+              echo "still down; issue #$open already open"
+            else
+              gh label create outage --color d73a4a --description 'vmock.fun is down' 2>/dev/null || true
+              gh issue create --label outage \
+                --title "🔴 vmock.fun is down" \
+                --body "$ALERT_MENTIONS $SITE failed its uptime check at $now: **$REASON**.
+
+          On the server: \`cd /opt/vmock-skribble/vckscribble-be/deploy && docker compose ps && docker compose logs --tail 100\`. See deploy/README.md, \"If something goes wrong\".
+
+          This issue closes itself when the site is back. [Check run]($RUN_URL)"
+            fi
+            exit 1
+          fi
+          if [ -n "$open" ]; then
+            gh issue close "$open" --comment "🟢 Back up at $now. [Check run]($RUN_URL)"
+          fi

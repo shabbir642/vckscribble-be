@@ -106,6 +106,15 @@ chmod +x /opt/vmock-skribble/vckscribble-be/deploy/backup.sh
 
 Backups land in `/data/backups` on the volume; the last 14 are kept.
 
+## 7. Watchdog
+
+Restarts the stack if it is running but stuck (Docker already restarts a
+container that crashes), and clears old images when the disk fills up:
+
+```bash
+(crontab -l 2>/dev/null; echo "* * * * * /opt/vmock-skribble/vckscribble-be/deploy/watchdog.sh >> /var/log/vmock-watchdog.log 2>&1") | crontab -
+```
+
 ## Updating
 
 ```bash
@@ -120,11 +129,19 @@ together — the frontend and backend share a protocol version.
 
 ## Keeping an eye on it
 
+- **Uptime alerts.** `.github/workflows/uptime.yml` checks the home page, the
+  health endpoint, server lag and the game socket every 5 minutes from
+  GitHub. When the site is down it opens an issue labelled `outage`, which
+  emails everyone watching the repo and the people it @mentions
+  (`ALERT_MENTIONS`), and closes it when the site is back. Run it by hand from
+  the repo's Actions tab → Uptime → Run workflow. GitHub pauses scheduled
+  workflows after 60 days without a commit; re-enable it there if so.
+- **Self-healing.** The watchdog (step 7) logs to `/var/log/vmock-watchdog.log`;
+  a quiet log means nothing has gone wrong.
 - `https://vmock.fun/api/health` reports players connected, rooms, memory and
   event-loop lag (`loopLagMs`, the number that means "lag" for players).
-  Point a free uptime monitor (e.g. UptimeRobot) at it.
-- `docker compose logs --tail 100 backend` shows joins, leaves, and errors
-  reported by players' browsers.
+- `docker compose logs --tail 100 backend` shows joins, leaves, kicks, and
+  errors reported by players' browsers.
 
 ## If something goes wrong
 

@@ -104,6 +104,38 @@ export function emitStateToEach(io: IO, room: Room): void {
   }
 }
 
+/**
+ * Takes a player out for good: the seat goes, the browser is barred from
+ * rejoining, and the round re-checks itself — a kicked drawer ends the turn.
+ */
+function kickOut(
+  io: IO,
+  engine: RoundEngine,
+  room: Room,
+  target: PlayerRecord,
+  by: 'host' | 'vote',
+): void {
+  const socketId = store.removePlayer(room, target);
+  const sock = socketId ? io.sockets.sockets.get(socketId) : undefined;
+  if (sock) {
+    sock.emit('room:kicked', { roomCode: room.code, by });
+    void sock.leave(room.code);
+  }
+  io.to(room.code).emit(
+    'chat:message',
+    systemMessage(by === 'host' ? `${target.name} was kicked by the host` : `${target.name} was voted out`),
+  );
+  // Full state, not just the roster: kicking the host hands the role on.
+  emitStateToEach(io, room);
+  engine.playerLeft(room, 0);
+  console.log(`[io] ${target.name} kicked from ${room.code} (${by})`);
+}
+
+/** A departure lowers the bar: anyone who now has a majority against them goes. */
+export function applyDecidedKicks(io: IO, engine: RoundEngine, room: Room): void {
+  for (const target of store.decidedKicks(room)) kickOut(io, engine, room, target, 'vote');
+}
+
 export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): void {
   const ip = (socket.data as { ip?: string }).ip ?? socket.handshake.address;
 
@@ -139,6 +171,7 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
     void socket.leave(prev.room.code);
     broadcastPlayers(prev.room);
     engine.playerLeft(prev.room);
+    applyDecidedKicks(io, engine, prev.room);
   };
 
   socket.on('room:create', (payload, ack) => {
@@ -217,6 +250,35 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       if (player.name !== before) {
         io.to(room.code).emit('chat:message', systemMessage(`${before} is now ${player.name}`));
       }
+    } catch (e) {
+      ack(toFailure(e));
+    }
+  });
+
+  socket.on('player:kick', (payload, ack) => {
+    try {
+      if (!allow(socket.id, 'player:kick')) {
+        ack(fail('RATE_LIMITED', 'Slow down a moment'));
+        return;
+      }
+      const targetId = z.string().min(1).max(40).parse(payload?.playerId);
+      const { room, player } = seatOf(socket);
+      const res = store.kickRequest(room, player, targetId);
+      ack({ ok: true, kicked: res.kicked, votes: res.votes, needed: res.needed });
+      if (res.kicked) {
+        kickOut(io, engine, room, res.target, res.by);
+        return;
+      }
+      broadcastPlayers(room);
+      const voted = room.kickVotes.get(targetId)?.has(player.id);
+      io.to(room.code).emit(
+        'chat:message',
+        systemMessage(
+          voted
+            ? `${player.name} voted to kick ${res.target.name} (${res.votes}/${res.needed})`
+            : `${player.name} took back their vote to kick ${res.target.name} (${res.votes}/${res.needed})`,
+        ),
+      );
     } catch (e) {
       ack(toFailure(e));
     }
@@ -480,6 +542,7 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
     broadcastPlayers(room);
     io.to(room.code).emit('chat:message', systemMessage(`${player.name} disconnected`));
     engine.playerLeft(room);
+    applyDecidedKicks(io, engine, room);
     console.log(`[io] ${player.name} left ${room.code} (${reason})`);
   });
 }

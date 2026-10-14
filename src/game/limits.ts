@@ -33,6 +33,7 @@ const SOCKET_LIMITS: Record<string, Limit> = {
   'word:report': { perSecond: 0.5, burst: 3 },
   'room:settings': { perSecond: 5, burst: 10 },
   'player:update': { perSecond: 1, burst: 5 },
+  'player:kick': { perSecond: 1, burst: 5 },
   'room:resume': { perSecond: 2, burst: 5 },
   'room:create': { perSecond: 1, burst: 3 },
   'room:join': { perSecond: 2, burst: 5 },

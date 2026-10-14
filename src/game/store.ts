@@ -1,6 +1,8 @@
 import {
   DEFAULT_SETTINGS,
   MIN_CUSTOM_WORDS,
+  MIN_PLAYERS_FOR_KICK_VOTE,
+  kickVotesNeeded,
   type ErrorCode,
   type Player,
   type RoomPreview,
@@ -114,6 +116,8 @@ export class RoomStore {
       drawn: new Set(),
       hintPlan: [],
       finalScoreboard: false,
+      kickVotes: new Map(),
+      banned: new Set(),
     };
     this.rooms.set(code, room);
     const player = this.addPlayer(room, name, avatar, socketId, deviceId);
@@ -130,6 +134,9 @@ export class RoomStore {
     deviceId: string | null = null,
   ): { room: Room; player: PlayerRecord } {
     const room = this.get(code);
+    if (deviceId && room.banned.has(deviceId)) {
+      throw new StoreError('KICKED', 'You were kicked from that room');
+    }
     const seats = [...room.players.values()];
     const sameName = (p: PlayerRecord) => p.name.toLowerCase() === name.toLowerCase();
 
@@ -321,6 +328,89 @@ export class RoomStore {
     this.setHost(room, next ?? null);
   }
 
+  /* ------------------------------------------------------------- kicking */
+
+  private present(room: Room): PlayerRecord[] {
+    return [...room.players.values()].filter((p) => p.connected);
+  }
+
+  /** Votes that still count: only from players who are here. */
+  private liveVotes(room: Room, targetId: string): string[] {
+    const voters = room.kickVotes.get(targetId);
+    if (!voters) return [];
+    return [...voters].filter((id) => id !== targetId && room.players.get(id)?.connected);
+  }
+
+  /**
+   * The host removes a player outright; anyone else casts (or, sent again,
+   * withdraws) a vote. Returns the player to remove once it is decided —
+   * the caller does the removal, which needs the socket layer.
+   */
+  kickRequest(
+    room: Room,
+    actor: PlayerRecord,
+    targetId: string,
+  ): { target: PlayerRecord; kicked: boolean; by: 'host' | 'vote'; votes: number; needed: number } {
+    const target = room.players.get(targetId);
+    if (!target) throw new StoreError('INVALID', 'That player is not in the room');
+    if (target.id === actor.id) throw new StoreError('INVALID', "You can't kick yourself");
+    const needed = kickVotesNeeded(this.present(room).length);
+    if (room.hostId === actor.id) {
+      return { target, kicked: true, by: 'host', votes: 0, needed };
+    }
+    if (this.present(room).length < MIN_PLAYERS_FOR_KICK_VOTE) {
+      throw new StoreError(
+        'INVALID',
+        `Vote kicks need at least ${MIN_PLAYERS_FOR_KICK_VOTE} players — ask the host instead`,
+      );
+    }
+    const voters = room.kickVotes.get(targetId) ?? new Set<string>();
+    if (voters.has(actor.id)) voters.delete(actor.id);
+    else voters.add(actor.id);
+    if (voters.size) room.kickVotes.set(targetId, voters);
+    else room.kickVotes.delete(targetId);
+    room.lastActivity = Date.now();
+    const votes = this.liveVotes(room, targetId).length;
+    return { target, kicked: votes >= needed, by: 'vote', votes, needed };
+  }
+
+  /**
+   * After someone leaves, fewer votes may be needed: anyone who now has a
+   * majority against them is out. Returns who should be removed.
+   */
+  decidedKicks(room: Room): PlayerRecord[] {
+    const presentCount = this.present(room).length;
+    if (presentCount < MIN_PLAYERS_FOR_KICK_VOTE) return [];
+    const needed = kickVotesNeeded(presentCount);
+    const out: PlayerRecord[] = [];
+    for (const targetId of room.kickVotes.keys()) {
+      const target = room.players.get(targetId);
+      if (target?.connected && this.liveVotes(room, targetId).length >= needed) out.push(target);
+    }
+    return out;
+  }
+
+  /**
+   * Deletes the seat for good — unlike a disconnect, which keeps it — and
+   * bars the browser from walking back in. Returns the socket that held it.
+   */
+  removePlayer(room: Room, target: PlayerRecord): string | null {
+    const socketId = target.socketId;
+    if (socketId) this.bySocket.delete(socketId);
+    room.players.delete(target.id);
+    room.order = room.order.filter((id) => id !== target.id);
+    if (target.deviceId) room.banned.add(target.deviceId);
+    room.kickVotes.delete(target.id);
+    for (const voters of room.kickVotes.values()) voters.delete(target.id);
+    room.reactions.delete(target.id);
+    room.lastActivity = Date.now();
+    if (room.hostId === target.id) {
+      this.cancelHandoff(room.code);
+      this.reassignHost(room);
+    }
+    return socketId;
+  }
+
   /** The host's list; only its size is public (settings.customWordCount). */
   setCustomWords(room: Room, words: string[]): void {
     room.customWords = words;
@@ -416,6 +506,7 @@ export class RoomStore {
         score,
         connected,
         isHost,
+        kickVotes: this.liveVotes(room, id),
       }));
   }
 
@@ -433,6 +524,7 @@ export class RoomStore {
           if (!p.connected && now - p.lastSeen > LOBBY_GRACE_MS) {
             room.players.delete(id);
             room.order = room.order.filter((x) => x !== id);
+            room.kickVotes.delete(id);
             droppedPlayers++;
             if (room.hostId === id) this.reassignHost(room);
           }
