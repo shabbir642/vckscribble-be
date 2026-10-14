@@ -6,7 +6,7 @@
  * that sat out the whole game — invisible to every other test here, because
  * they all start with a fixed roster and never add to it.
  */
-import { io } from 'socket.io-client';
+import { io } from './lib/io.mjs';
 
 const URL = process.argv[2] ?? 'http://localhost:3001';
 let pass = 0;

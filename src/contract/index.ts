@@ -8,7 +8,7 @@
  * Keep this file dependency-free so both repos can consume it as-is.
  */
 
-export const CONTRACT_VERSION = 11;
+export const CONTRACT_VERSION = 12;
 
 /* ---------------------------------------------------------------- domain */
 
@@ -315,7 +315,13 @@ export interface ServerToClientEvents {
   /** Drawer only — the solution they must draw. */
   'word:assigned': (p: { text: string }) => void;
 
+  /**
+   * Sent to the whole room, the drawer included, so the server can broadcast
+   * each one with a single publish. The drawer has already drawn its own
+   * stroke locally and must ignore the echo of it.
+   */
   'draw:stroke': (p: { stroke: Stroke }) => void;
+  /** As draw:stroke: the drawer receives, and ignores, its own points. */
   'draw:points': (p: { strokeId: string; points: number[] }) => void;
   'draw:undo': (p: { strokeId: string }) => void;
   'draw:clear': (p: Record<string, never>) => void;

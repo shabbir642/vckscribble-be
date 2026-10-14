@@ -8,7 +8,7 @@
  *
  * Usage: node scripts/smoke-host.mjs [url]   (takes ~25 s: waits out the grace)
  */
-import { io } from 'socket.io-client';
+import { io } from './lib/io.mjs';
 
 const URL = process.argv[2] ?? 'http://localhost:3001';
 const GRACE_MS = 10_000;

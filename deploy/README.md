@@ -169,4 +169,5 @@ together — the frontend and backend share a protocol version.
 | Browser says the certificate is invalid | `dig +short vmock.fun` must show only your server; then `docker compose logs web` |
 | Page loads, but stuck on "Connecting…" | `docker compose logs backend`; `CLIENT_ORIGIN` must match the address bar exactly |
 | `docker compose up` fails building | `free -h` (is the swap on?) and re-run; the error is in the build output |
+| `/api` or the game is 502 but the home page loads | Caddy cannot reach the backend's Unix socket: `docker compose ps` (backend healthy?), `docker compose logs backend` |
 | Everything was fine, now it's down | `docker compose ps`; `docker compose up -d` restarts anything stopped |

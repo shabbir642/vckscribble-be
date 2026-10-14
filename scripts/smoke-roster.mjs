@@ -6,7 +6,7 @@
  * "what the round thinks is happening". The other suites all start with a fixed
  * roster and never touch it, so none of them could have caught any of these.
  */
-import { io } from 'socket.io-client';
+import { io } from './lib/io.mjs';
 
 const URL = process.argv[2] ?? 'http://localhost:3001';
 let pass = 0;

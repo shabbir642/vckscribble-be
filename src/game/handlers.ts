@@ -467,7 +467,10 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       // Trust the seat, not the claim: a client could assert any drawerId.
       stroke.drawerId = player.id;
       startStroke(room, stroke);
-      socket.to(room.code).emit('draw:stroke', { stroke });
+      // To the whole room, the drawer included (their client ignores its own
+      // strokes): a broadcast that excludes the sender cannot use uWS's
+      // one-call publish and falls back to a JavaScript send per player.
+      io.to(room.code).emit('draw:stroke', { stroke });
     } catch (e) {
       toast(e);
     }
@@ -475,7 +478,8 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
 
   /**
    * The hot path: a live drag sends only its new points every ~40 ms. Relayed
-   * as-is, so the cost per message is independent of how long the stroke is.
+   * as-is, so the cost per message is independent of how long the stroke is,
+   * and to the whole room (see draw:stroke) so it is a single publish.
    */
   socket.on('draw:points', (payload) => {
     try {
@@ -485,7 +489,7 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       const id = z.string().min(1).max(40).parse(payload?.id);
       const points = parsePoints(payload?.points, MAX_POINTS_PER_STROKE);
       appendPoints(room, player.id, id, points);
-      socket.to(room.code).emit('draw:points', { strokeId: id, points });
+      io.to(room.code).emit('draw:points', { strokeId: id, points });
     } catch (e) {
       toast(e);
     }

@@ -1,7 +1,7 @@
-import { Router } from 'express';
 import { z } from 'zod';
 import { WORD_PACKS, normalizeWord, type WordPackId } from '../contract/index.js';
 import { sqlite, stmt } from '../db/index.js';
+import type { Reply, Request } from './uws.js';
 
 const PACKS = WORD_PACKS.map((p) => p.id) as [WordPackId, ...WordPackId[]];
 const WordInput = z.object({
@@ -24,8 +24,7 @@ const Body = z.object({
  * refuses every request rather than running open: an unconfigured deploy
  * should fail closed, not expose a public write endpoint.
  */
-export function wordsRouter(): Router {
-  const router = Router();
+export function wordsHandler(): (req: Request, body: unknown) => Reply {
   const token = process.env.WORDS_API_TOKEN?.trim();
   // Prepared once, not per request (see the note on statements in game/words.ts).
   const insert = stmt(
@@ -33,25 +32,22 @@ export function wordsRouter(): Router {
      VALUES (?, ?, ?, ?, ?, 'owner')`,
   );
 
-  router.post('/words', (req, res) => {
+  return (req, body) => {
     if (!token) {
-      res.status(503).json({
-        ok: false,
-        error: 'WORDS_API_TOKEN is not configured; the endpoint is disabled.',
-      });
-      return;
+      return {
+        status: 503,
+        body: { ok: false, error: 'WORDS_API_TOKEN is not configured; the endpoint is disabled.' },
+      };
     }
-    const header = req.get('authorization') ?? '';
+    const header = req.headers['authorization'] ?? '';
     const presented = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
     if (!presented || !safeEqual(presented, token)) {
-      res.status(401).json({ ok: false, error: 'Unauthorized' });
-      return;
+      return { status: 401, body: { ok: false, error: 'Unauthorized' } };
     }
 
-    const parsed = Body.safeParse(req.body);
+    const parsed = Body.safeParse(body);
     if (!parsed.success) {
-      res.status(400).json({ ok: false, error: parsed.error.issues[0]?.message });
-      return;
+      return { status: 400, body: { ok: false, error: parsed.error.issues[0]?.message } };
     }
 
     let inserted = 0;
@@ -62,15 +58,16 @@ export function wordsRouter(): Router {
     });
     run(parsed.data.words);
 
-    res.json({
-      ok: true,
-      inserted,
-      skipped: parsed.data.words.length - inserted,
-      received: parsed.data.words.length,
-    });
-  });
-
-  return router;
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        inserted,
+        skipped: parsed.data.words.length - inserted,
+        received: parsed.data.words.length,
+      },
+    };
+  };
 }
 
 /** Constant-time compare so the token cannot be recovered by timing. */

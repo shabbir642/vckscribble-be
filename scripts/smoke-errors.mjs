@@ -7,7 +7,7 @@
  * matters more than it looks: a socket that never connects is the one failure
  * the backend cannot otherwise see.
  */
-import { io } from 'socket.io-client';
+import { io } from './lib/io.mjs';
 
 const URL = process.argv[2] ?? 'http://localhost:3001';
 let pass = 0;

@@ -6,7 +6,7 @@
  * Usage: node scripts/smoke-words.mjs [url]   (~25 s: plays a 15 s turn)
  */
 import { existsSync } from 'node:fs';
-import { io } from 'socket.io-client';
+import { io } from './lib/io.mjs';
 
 const URL = process.argv[2] ?? 'http://localhost:3001';
 let pass = 0;
@@ -119,9 +119,11 @@ check('at least half of the letters stay hidden', shown <= Math.floor(letters / 
 
 // Scoring: Bo guesses first, Cy second.
 const before = { d: scoreOf(drawer, drawer.name), a: scoreOf(drawer, gA.name), b: scoreOf(drawer, gB.name) };
+// Time left as the guess goes out: the server scores it on arrival, a moment
+// later, so this is the upper bound for the speed share.
+const frac1 = Math.max(0, (start.endsAt - Date.now()) / 15_000);
 gA.emit('chat:guess', { text: word });
 await sleep(300);
-const frac1 = Math.max(0, (start.endsAt - Date.now()) / 15_000);
 gB.emit('chat:guess', { text: word.toUpperCase() });
 await sleep(400);
 const gainB = scoreOf(drawer, gA.name) - before.a;

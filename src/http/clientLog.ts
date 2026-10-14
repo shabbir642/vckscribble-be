@@ -1,5 +1,5 @@
-import { Router } from 'express';
 import { z } from 'zod';
+import type { Reply, Request } from './uws.js';
 
 const Body = z.object({
   source: z.enum(['render', 'window', 'promise', 'socket']),
@@ -42,24 +42,13 @@ function overLimit(ip: string): boolean {
  * by necessity, so it is rate limited and everything in it is treated as
  * untrusted text.
  */
-export function clientLogRouter(): Router {
-  const r = Router();
-  r.post('/client-log', (req, res) => {
-    const ip = req.ip ?? 'unknown';
-    if (overLimit(ip)) {
-      res.status(429).json({ ok: false });
-      return;
-    }
-    const parsed = Body.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ ok: false });
-      return;
-    }
-    const { roomCode, playerName, source, message } = parsed.data;
-    console.warn(
-      `[client] ${source} from ${playerName ?? 'anon'}@${roomCode ?? '-'}: ${message}`,
-    );
-    res.json({ ok: true });
-  });
-  return r;
+export function clientLog(req: Request, body: unknown): Reply {
+  if (overLimit(req.ip)) return { status: 429, body: { ok: false } };
+  const parsed = Body.safeParse(body);
+  if (!parsed.success) return { status: 400, body: { ok: false } };
+  const { roomCode, playerName, source, message } = parsed.data;
+  console.warn(
+    `[client] ${source} from ${playerName ?? 'anon'}@${roomCode ?? '-'}: ${message}`,
+  );
+  return { status: 200, body: { ok: true } };
 }

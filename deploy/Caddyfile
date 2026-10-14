@@ -2,11 +2,12 @@
 # DOMAIN=:80 serves plain HTTP on the server's IP, e.g. before DNS is ready.
 {$DOMAIN}
 
-# Backend: REST and Socket.IO. Caddy proxies WebSocket upgrades as-is and
-# appends the client address to X-Forwarded-For.
+# Backend: REST and Socket.IO, over the Unix socket the backend listens on
+# (a volume shared by both containers). Caddy proxies WebSocket upgrades as-is
+# and appends the client address to X-Forwarded-For.
 @backend path /api/* /socket.io/*
 handle @backend {
-	reverse_proxy backend:3001
+	reverse_proxy unix//run/vmock/backend.sock
 }
 
 # Frontend: the static bundle. Hashed assets cache forever; the HTML never

@@ -1,8 +1,8 @@
-import { createServer } from 'node:http';
+import { chmodSync, rmSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
-import cors from 'cors';
-import express from 'express';
 import { Server } from 'socket.io';
+import type * as UWS from 'uWebSockets.js';
 import type {
   ClientToServerEvents,
   ServerToClientEvents,
@@ -10,8 +10,17 @@ import type {
 import { CONTRACT_VERSION } from './contract/index.js';
 import { ensureSchema, sqlite, stmt } from './db/index.js';
 import { seedWords } from './db/seed.js';
-import { clientLogRouter, sweepClientLog } from './http/clientLog.js';
-import { wordsRouter } from './http/words.js';
+import { clientLog, sweepClientLog } from './http/clientLog.js';
+import {
+  corsHeaders,
+  parseJson,
+  readBody,
+  readRequest,
+  send,
+  type Reply,
+  type Request,
+} from './http/uws.js';
+import { wordsHandler } from './http/words.js';
 import { registerHandlers } from './game/handlers.js';
 import { closeConnection, openConnection, sweepLimits } from './game/limits.js';
 import { ensureSnapshotTable, loadRooms, saveRooms } from './game/persist.js';
@@ -19,6 +28,12 @@ import { RoundEngine } from './game/round.js';
 import { store } from './game/store.js';
 
 const PORT = Number(process.env.PORT ?? 3001);
+/**
+ * When set, listen on this Unix socket instead of PORT. In production Caddy
+ * reaches the backend through it (a shared volume): no TCP stack, no Docker
+ * network in between, for every frame of every game.
+ */
+const SOCKET_PATH = process.env.SOCKET_PATH?.trim() || null;
 /** Set to 1 only when a reverse proxy (Caddy in deploy/) is the sole ingress. */
 const TRUST_PROXY = process.env.TRUST_PROXY === '1';
 /**
@@ -38,12 +53,10 @@ console.log(
   `[db] dictionary ready — ${report.inserted} new, ${report.skipped} existing, ${report.total} seed entries`,
 );
 
-const app = express();
-// Behind the reverse proxy (TRUST_PROXY=1), client IPs come from X-Forwarded-For.
-app.set('trust proxy', TRUST_PROXY ? 1 : false);
-app.disable('x-powered-by');
-app.use(cors({ origin: CLIENT_ORIGIN, credentials: true }));
-app.use(express.json({ limit: '256kb' }));
+// Loaded as CommonJS: the package's ESM wrapper (v20.71.0) imports a file
+// it does not ship.
+const uWS = createRequire(import.meta.url)('uWebSockets.js') as typeof UWS;
+const app = uWS.App();
 
 /**
  * Event-loop delay is the number that matters for a single-threaded relay:
@@ -56,9 +69,9 @@ loopDelay.enable();
 const lagMs = (ns: number) => Math.max(0, +(ns / 1e6 - LOOP_RESOLUTION_MS).toFixed(1));
 const enabledWords = stmt('SELECT COUNT(*) AS c FROM words WHERE enabled = 1');
 
-app.get('/api/health', (_req, res) => {
+function health(): Reply {
   const { c } = enabledWords.get() as { c: number };
-  res.json({
+  return { status: 200, body: {
     ok: true,
     contractVersion: CONTRACT_VERSION,
     enabledWords: c,
@@ -70,24 +83,66 @@ app.get('/api/health', (_req, res) => {
       p99: lagMs(loopDelay.percentile(99)),
       max: lagMs(loopDelay.max),
     },
+  } };
+}
+
+const API_BODY_LIMIT = 256 * 1024;
+const words = wordsHandler();
+const routes: Record<string, (req: Request, body: unknown) => Reply> = {
+  'GET /api/health': () => health(),
+  'POST /api/words': words,
+  'POST /api/client-log': clientLog,
+};
+
+app.any('/api/*', (res, req) => {
+  const r = readRequest(res, req, TRUST_PROXY);
+  const cors = corsHeaders(r.headers['origin'], CLIENT_ORIGIN);
+  if (r.method === 'OPTIONS') {
+    send(res, { status: 204, body: null }, [
+      ...cors,
+      ['Access-Control-Allow-Methods', 'GET,POST'],
+      ['Access-Control-Allow-Headers', 'content-type,authorization'],
+    ]);
+    return;
+  }
+  const route = routes[`${r.method} ${r.url}`];
+  if (!route) {
+    res.onAborted(() => undefined);
+    send(res, { status: 404, body: { ok: false, error: 'Not found' } }, cors);
+    return;
+  }
+  void readBody(res, r.method === 'GET' ? 0 : API_BODY_LIMIT).then((raw) => {
+    if (raw === null) return; // the client went away
+    if (raw === 'too-large') {
+      send(res, { status: 413, body: { ok: false, error: 'Body too large' } }, cors);
+      return;
+    }
+    const body = parseJson(raw, r.headers['content-type']);
+    if (body === undefined) {
+      send(res, { status: 400, body: { ok: false, error: 'Invalid JSON' } }, cors);
+      return;
+    }
+    try {
+      send(res, route(r, body), cors);
+    } catch (e) {
+      console.error('[http] route failed', e);
+      send(res, { status: 500, body: { ok: false } }, cors);
+    }
   });
 });
 
-app.use('/api', wordsRouter());
-app.use('/api', clientLogRouter());
-
-const httpServer = createServer(app);
-
-export const io = new Server<ClientToServerEvents, ServerToClientEvents>(
-  httpServer,
-  {
-    cors: { origin: CLIENT_ORIGIN, credentials: true },
-    // Socket.IO parses a message before any handler (and so any rate limit)
-    // sees it. The default 1 MB let one client make the server parse junk
-    // for free; the largest legitimate message is a 600-point stroke, ~8 KB.
-    maxHttpBufferSize: 100_000,
-  },
-);
+export const io = new Server<ClientToServerEvents, ServerToClientEvents>({
+  cors: { origin: CLIENT_ORIGIN, credentials: true },
+  // Socket.IO parses a message before any handler (and so any rate limit)
+  // sees it. The default 1 MB let one client make the server parse junk
+  // for free; the largest legitimate message is a 600-point stroke, ~8 KB.
+  // On uWS this is also the WebSocket frame limit.
+  maxHttpBufferSize: 100_000,
+  // The client is bundled with the frontend; nothing should fetch it here.
+  serveClient: false,
+});
+// Rooms become uWS pub/sub topics: a broadcast to a room is one C++ publish.
+io.attachApp(app);
 
 /**
  * Behind the reverse proxy every socket comes from the proxy's address; the
@@ -171,28 +226,29 @@ const sweeper = setInterval(() => {
 sweeper.unref();
 
 
-/**
- * A port collision is otherwise easy to miss: the old process keeps serving,
- * so the app still answers and only behaves as if the new configuration were
- * ignored — because it is. Say so plainly and stop.
- */
-httpServer.on('error', (e: NodeJS.ErrnoException) => {
-  if (e.code === 'EADDRINUSE') {
-    console.error(
-      `[http] port ${PORT} is already in use — another server is still running ` +
-        `and will keep answering with ITS configuration, not this one. Stop it first.`,
-    );
+let listenSocket: UWS.us_listen_socket | null = null;
+const onListen = (where: string) => (sock: UWS.us_listen_socket | false) => {
+  if (!sock) {
+    // A port collision is otherwise easy to miss: an old server keeps
+    // answering with ITS configuration. Say so plainly and stop.
+    console.error(`[http] could not listen on ${where} — is another server still running? Stop it first.`);
     process.exit(1);
   }
-  throw e;
-});
-
-httpServer.listen(PORT, () => {
-  console.log(`[http] listening on :${PORT} — client origin ${CLIENT_ORIGIN.join(', ')}`);
+  listenSocket = sock;
+  // The proxy in the other container connects as a different user.
+  if (SOCKET_PATH) chmodSync(SOCKET_PATH, 0o666);
+  console.log(`[http] listening on ${where} — client origin ${CLIENT_ORIGIN.join(', ')}`);
   if (!process.env.WORDS_API_TOKEN) {
     console.log('[http] POST /api/words disabled (WORDS_API_TOKEN unset)');
   }
-});
+};
+if (SOCKET_PATH) {
+  // A socket file left by the previous run would make the listen fail.
+  rmSync(SOCKET_PATH, { force: true });
+  app.listen_unix(onListen(SOCKET_PATH), SOCKET_PATH);
+} else {
+  app.listen(PORT, onListen(`:${PORT}`));
+}
 
 /**
  * SQLite in WAL mode needs a clean close, or the -wal file is left for the next
@@ -210,16 +266,14 @@ function shutdown(signal: string): void {
   clearInterval(ticker);
   clearInterval(sweeper);
   io.close();
-  httpServer.close(() => {
-    try {
-      sqlite.close();
-    } catch (e) {
-      console.error('[db] close failed', e);
-    }
-    process.exit(0);
-  });
-  // Don't hang forever on a stuck connection.
-  setTimeout(() => process.exit(0), 5000).unref();
+  if (listenSocket) uWS.us_listen_socket_close(listenSocket);
+  try {
+    sqlite.close();
+  } catch (e) {
+    console.error('[db] close failed', e);
+  }
+  if (SOCKET_PATH) rmSync(SOCKET_PATH, { force: true });
+  process.exit(0);
 }
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));

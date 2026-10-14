@@ -16,14 +16,18 @@ services:
       CLIENT_ORIGIN: ${CLIENT_ORIGIN}
       WORDS_API_TOKEN: ${WORDS_API_TOKEN:-}
       IP_LIMIT_SCALE: ${IP_LIMIT_SCALE:-1}
+      # Caddy reaches the backend through this Unix socket on a shared volume:
+      # no TCP and no Docker network on the hop every game frame takes.
+      SOCKET_PATH: /run/vmock/backend.sock
     volumes:
       - game-data:/data
+      - sockets:/run/vmock
+    # No network at all: the socket is the only way in, and it needs no way out.
+    network_mode: none
     # One socket per player; the default 1024 descriptors caps you well
     # below "hundreds of concurrent users" once proxy connections count too.
     ulimits:
       nofile: { soft: 65535, hard: 65535 }
-    # Not published: only Caddy reaches it, over the compose network.
-    expose: ["3001"]
     stop_grace_period: 10s
 
   web:
@@ -31,20 +35,23 @@ services:
     restart: unless-stopped
     depends_on:
       backend: { condition: service_healthy }
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
+    # The host's network directly, not Docker's bridge: players' traffic skips
+    # Docker's port forwarding (NAT and connection tracking). Caddy binds 80
+    # and 443 (and 443/udp for HTTP/3) itself; the host firewall (ufw) now
+    # governs them, and setup-server.sh opens exactly those.
+    network_mode: host
     environment:
       DOMAIN: ${DOMAIN}
     ulimits:
       nofile: { soft: 65535, hard: 65535 }
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - sockets:/run/vmock
       - caddy-data:/data      # TLS certificates — keep, or Let's Encrypt rate-limits you
       - caddy-config:/config
 
 volumes:
   game-data:
+  sockets:
   caddy-data:
   caddy-config:

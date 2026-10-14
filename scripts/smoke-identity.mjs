@@ -5,7 +5,7 @@
  *
  * Usage: node scripts/smoke-identity.mjs [url]
  */
-import { io } from 'socket.io-client';
+import { io } from './lib/io.mjs';
 
 const URL = process.argv[2] ?? 'http://localhost:3001';
 let pass = 0;

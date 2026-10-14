@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 
-FROM node:22-slim AS build
+# Debian 13 (trixie): uWebSockets.js needs glibc 2.38+, which bookworm lacks.
+FROM node:22-trixie-slim AS build
 WORKDIR /app
 RUN corepack enable
 # better-sqlite3 compiles from source; these are needed only at build time.
@@ -12,13 +13,13 @@ COPY tsconfig.json ./
 COPY src ./src
 RUN pnpm build && pnpm prune --prod
 
-FROM node:22-slim AS runtime
+FROM node:22-trixie-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 # Runs as the image's existing non-root user. The database lives on a volume
 # at /data so word stats, player-invented words and reports survive restarts;
 # the directory is created here so the volume inherits node's ownership.
-RUN mkdir -p /data && chown node:node /data
+RUN mkdir -p /data /run/vmock && chown node:node /data /run/vmock
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/package.json ./
@@ -26,6 +27,7 @@ USER node
 ENV DATABASE_URL=/data/game.db
 ENV PORT=3001
 EXPOSE 3001
+# Over the Unix socket when SOCKET_PATH is set (deploy/), else the TCP port.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s \
-  CMD node -e "fetch('http://localhost:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD node -e "const p=process.env.SOCKET_PATH;require('http').get({path:'/api/health',...(p?{socketPath:p}:{port:process.env.PORT})},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
 CMD ["node", "dist/index.js"]

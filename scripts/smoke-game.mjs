@@ -3,7 +3,7 @@
  * Exercises the round machine end to end with short timers: word selection,
  * the custom-word path, drawer authority, and turn rotation.
  */
-import { io } from 'socket.io-client';
+import { io } from './lib/io.mjs';
 
 const URL = process.argv[2] ?? 'http://localhost:3001';
 let pass = 0;

@@ -3,7 +3,7 @@
  * Kicking: the host removes a player outright; everyone else votes, and a
  * majority of the players present removes them. A kicked browser stays out.
  */
-import { io } from 'socket.io-client';
+import { io } from './lib/io.mjs';
 
 const URL = process.argv[2] ?? 'http://localhost:3001';
 let pass = 0;
