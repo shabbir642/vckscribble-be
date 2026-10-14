@@ -61,6 +61,8 @@ export interface Room {
   customCounts: Record<string, number>;
   /** Points the drawer has earned this turn, for the per-turn cap. */
   drawerEarned: number;
+  /** Each guesser's vote on the drawing in progress; cleared every turn. */
+  reactions: Map<string, 'up' | 'down'>;
   /** Players who reported the current word; one report each per turn. */
   reportedBy: Set<string>;
   /** The host's custom word list. Never broadcast — guessers would see it. */

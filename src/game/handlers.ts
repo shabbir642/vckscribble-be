@@ -383,6 +383,17 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
     }
   });
 
+  socket.on('draw:react', (payload) => {
+    try {
+      if (!allow(socket.id, 'draw:react')) return;
+      const reaction = z.enum(['up', 'down']).parse(payload?.reaction);
+      const { room, player } = seatOf(socket);
+      engine.react(room, player, reaction);
+    } catch (e) {
+      toast(e);
+    }
+  });
+
   /* ------------------------------------------------------------ drawing */
 
   socket.on('draw:stroke', (payload) => {

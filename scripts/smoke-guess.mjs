@@ -72,6 +72,26 @@ const drawerToast = next(drawer, 'error:toast', 3000);
 drawer.emit('chat:guess', { text: solution });
 check('drawer is blocked from chat', (await drawerToast).code === 'NOT_DRAWER');
 
+// reactions: one vote per guesser per turn, switchable, never by the drawer
+const r1 = next(g2, 'draw:reaction');
+g1.emit('draw:react', { reaction: 'up' });
+const like = await r1;
+check('a like is broadcast with totals', like.reaction === 'up' && like.likes === 1 && like.dislikes === 0, JSON.stringify(like));
+const repeat = collect(g2, 'draw:reaction', 600);
+g1.emit('draw:react', { reaction: 'up' });
+check('repeating the same vote is ignored', (await repeat).length === 0);
+const r2 = next(g2, 'draw:reaction');
+g1.emit('draw:react', { reaction: 'down' });
+const switched = await r2;
+check('switching moves the vote, not adds one', switched.likes === 0 && switched.dislikes === 1, JSON.stringify(switched));
+const r3 = next(g1, 'draw:reaction');
+g2.emit('draw:react', { reaction: 'up' });
+const second = await r3;
+check('each guesser counts once', second.likes === 1 && second.dislikes === 1, JSON.stringify(second));
+const ownToast = next(drawer, 'error:toast', 3000);
+drawer.emit('draw:react', { reaction: 'up' });
+check('the drawer cannot rate their own drawing', (await ownToast).code === 'NOT_DRAWER');
+
 // correct guess: system message, not the word itself
 const sys = next(g2, 'chat:message');
 const scored = next(g2, 'room:players');
@@ -102,6 +122,10 @@ g2.emit('chat:guess', { text: solution });
 const rev = await reveal;
 check('round ends once everyone has guessed', rev.phase === 'reveal', rev.phase);
 check('solution revealed at round end', rev.solution === solution);
+check('the reveal carries the drawing\'s reactions', rev.likes === 1 && rev.dislikes === 1, JSON.stringify([rev.likes, rev.dislikes]));
+const late = next(g1, 'error:toast', 3000);
+g1.emit('draw:react', { reaction: 'up' });
+check('no reacting once the turn is over', (await late).code === 'BAD_PHASE');
 
 drawer.disconnect(); g1.disconnect(); g2.disconnect();
 console.log(`\n${pass} passed, ${failures.length} failed`);

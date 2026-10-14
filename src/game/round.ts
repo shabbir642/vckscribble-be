@@ -148,6 +148,8 @@ export class RoundEngine {
       round: 1,
       totalRounds: room.settings.rounds,
       guessedPlayerIds: [],
+      likes: 0,
+      dislikes: 0,
     };
     for (const p of room.players.values()) p.score = 0;
     this.sendPlayers(room);
@@ -166,6 +168,7 @@ export class RoundEngine {
     room.hintPlan = [];
     room.active = null;
     room.reportedBy.clear();
+    room.reactions.clear();
     this.io.to(room.code).emit('draw:clear', {});
 
     const drawer = this.currentDrawer(room);
@@ -200,6 +203,8 @@ export class RoundEngine {
       solution: null,
       endsAt,
       guessedPlayerIds: [],
+      likes: 0,
+      dislikes: 0,
     };
     this.publish(room);
     this.system(room, `${drawer.name} is choosing a word…`);
@@ -308,6 +313,8 @@ export class RoundEngine {
       solution: null,
       endsAt: Date.now() + ms,
       guessedPlayerIds: [],
+      likes: 0,
+      dislikes: 0,
     };
     this.publish(room);
 
@@ -405,6 +412,41 @@ export class RoundEngine {
       default:
         break; // lobby and finished have no clock
     }
+  }
+
+  /* ---------------------------------------------------------- reactions */
+
+  /**
+   * A guesser's 👍 / 👎 on the drawing in progress. One vote each per turn:
+   * switching is allowed, repeating the same vote is ignored — so the buttons
+   * can't be used to flood the room. Totals ride in the round state, so they
+   * survive a reconnect or a server restart.
+   */
+  react(room: Room, player: PlayerRecord, reaction: 'up' | 'down'): void {
+    if (room.round.phase !== 'drawing') {
+      throw new StoreError('BAD_PHASE', 'You can react while someone is drawing');
+    }
+    if (room.round.drawerId === player.id) {
+      throw new StoreError('NOT_DRAWER', 'No rating your own drawing!');
+    }
+    if (room.reactions.get(player.id) === reaction) return;
+    room.reactions.set(player.id, reaction);
+    let likes = 0;
+    let dislikes = 0;
+    for (const r of room.reactions.values()) r === 'up' ? likes++ : dislikes++;
+    room.round = { ...room.round, likes, dislikes };
+    this.io.to(room.code).emit('draw:reaction', {
+      playerId: player.id,
+      playerName: player.name,
+      reaction,
+      likes,
+      dislikes,
+    });
+    this.system(
+      room,
+      `${player.name} ${reaction === 'up' ? 'liked' : 'disliked'} the drawing`,
+      reaction === 'up' ? 'correct' : 'wrong',
+    );
   }
 
   /* ----------------------------------------------------------- guessing */
@@ -733,6 +775,8 @@ export class RoundEngine {
       solution: null,
       endsAt: null,
       guessedPlayerIds: [],
+      likes: 0,
+      dislikes: 0,
     };
     room.active = null;
     room.offered = [];

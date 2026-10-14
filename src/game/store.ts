@@ -40,6 +40,8 @@ function freshRound(): RoundState {
     solution: null,
     endsAt: null,
     guessedPlayerIds: [],
+    likes: 0,
+    dislikes: 0,
   };
 }
 
@@ -106,6 +108,7 @@ export class RoomStore {
       customCounts: {},
       drawerEarned: 0,
       reportedBy: new Set(),
+      reactions: new Map(),
       customWords: [],
       usedCustom: new Set(),
       drawn: new Set(),

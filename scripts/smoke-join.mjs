@@ -40,11 +40,13 @@ await bState;
 
 await emit(a, 'room:settings', { rounds: 1, drawSeconds: 30, selectSeconds: 5 });
 
-// Turn 1 of 1 round, with only Ann and Ben on the roster.
-const annOptions = next(a, 'word:options');
-const annAssigned = next(a, 'word:assigned');
+// Turn 1 of 1 round, with only Ann and Ben on the roster. Turn order is
+// shuffled, so `first` is whichever of them is offered words.
+const firstOffer = new Promise((res) => [a, b].forEach((s) => s.once('word:options', () => res(s))));
 await emit(a, 'room:start', {});
-await annOptions;
+const first = await firstOffer;
+const second = first === a ? b : a;
+const firstAssigned = next(first, 'word:assigned');
 
 // Cal arrives after the game is under way — the whole point of the test.
 const c = await connect();
@@ -64,15 +66,15 @@ const solveTurn = async (assignedPromise, guessers) => {
   return assigned.text;
 };
 
-// Ann never picks; the selection timer auto-chooses for her after 5s.
-await solveTurn(annAssigned, [b, c]);
+// The first drawer never picks; the selection timer auto-chooses after 5s.
+await solveTurn(firstAssigned, [second, c]);
 
-// Turn 2: Ben, who was on the original roster.
-await next(b, 'word:options');
+// Turn 2: the other original player.
+await next(second, 'word:options');
 check('turn 2 goes to the second original player', true);
-const benAssigned = next(b, 'word:assigned');
-await emit(b, 'word:custom', { text: 'Stakeholder Alignment Sync' });
-await solveTurn(benAssigned, [a, c]);
+const secondAssigned = next(second, 'word:assigned');
+await emit(second, 'word:custom', { text: 'Stakeholder Alignment Sync' });
+await solveTurn(secondAssigned, [first, c]);
 
 // Turn 3: Cal. Before the fix this timed out — Cal was never in the queue.
 let calGotATurn = true;

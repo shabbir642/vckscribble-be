@@ -8,7 +8,7 @@
  * Keep this file dependency-free so both repos can consume it as-is.
  */
 
-export const CONTRACT_VERSION = 8;
+export const CONTRACT_VERSION = 9;
 
 /* ---------------------------------------------------------------- domain */
 
@@ -135,7 +135,12 @@ export interface RoundState {
   solution: string | null;
   endsAt: number | null;
   guessedPlayerIds: string[];
+  /** Guessers' 👍 / 👎 on the current drawing; reset every turn. */
+  likes: number;
+  dislikes: number;
 }
+
+export type Reaction = 'up' | 'down';
 
 export type ChatChannel = 'guess' | 'post-guess' | 'system';
 
@@ -260,6 +265,8 @@ export interface ClientToServerEvents {
   'draw:clear': (p: Record<string, never>) => void;
 
   'chat:guess': (p: { text: string }) => void;
+  /** A guesser rates the drawing in progress. One vote per turn; may switch. */
+  'draw:react': (p: { reaction: Reaction }) => void;
   'word:report': (p: { reason: string }, ack: Ack) => void;
 }
 
@@ -294,6 +301,14 @@ export interface ServerToClientEvents {
   'draw:sync': (p: { strokes: Stroke[] }) => void;
 
   'chat:message': (p: ChatMessage) => void;
+  /** Someone rated the drawing; carries the new totals. */
+  'draw:reaction': (p: {
+    playerId: string;
+    playerName: string;
+    reaction: Reaction;
+    likes: number;
+    dislikes: number;
+  }) => void;
   /** Private to one guesser — near-miss feedback. */
   'chat:close': (p: { text: string }) => void;
 

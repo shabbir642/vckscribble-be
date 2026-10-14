@@ -24,6 +24,7 @@ const SOCKET_LIMITS: Record<string, Limit> = {
   // stroke-start and pointer-up in the same window.
   'draw:points': { perSecond: 40, burst: 80 },
   'draw:undo': { perSecond: 6, burst: 10 },
+  'draw:react': { perSecond: 1, burst: 4 },
   'draw:clear': { perSecond: 2, burst: 4 },
   // Failed validation burns budget too, and rejections are expected here
   // (typos, blocked words). Accepted customs are already capped per game by
