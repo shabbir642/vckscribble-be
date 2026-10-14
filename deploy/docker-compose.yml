@@ -1,0 +1,50 @@
+# Whole stack on one VPS: Caddy (HTTPS + static frontend + reverse proxy) in
+# front of the Node backend. Expects both repos cloned side by side:
+#   ~/vckscribble-be   (this repo; run compose from deploy/)
+#   ~/vckscribble-fe
+# Usage: cp .env.example .env && edit && docker compose up -d --build
+name: vckscribble
+
+services:
+  backend:
+    build: ..
+    restart: unless-stopped
+    environment:
+      # Caddy is the only way in, so its X-Forwarded-For is trustworthy and
+      # per-IP limits see real client addresses.
+      TRUST_PROXY: "1"
+      CLIENT_ORIGIN: ${CLIENT_ORIGIN}
+      WORDS_API_TOKEN: ${WORDS_API_TOKEN:-}
+      IP_LIMIT_SCALE: ${IP_LIMIT_SCALE:-1}
+    volumes:
+      - game-data:/data
+    # One socket per player; the default 1024 descriptors caps you well
+    # below "hundreds of concurrent users" once proxy connections count too.
+    ulimits:
+      nofile: { soft: 65535, hard: 65535 }
+    # Not published: only Caddy reaches it, over the compose network.
+    expose: ["3001"]
+    stop_grace_period: 10s
+
+  web:
+    build: ../../vckscribble-fe
+    restart: unless-stopped
+    depends_on:
+      backend: { condition: service_healthy }
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN}
+    ulimits:
+      nofile: { soft: 65535, hard: 65535 }
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data      # TLS certificates — keep, or Let's Encrypt rate-limits you
+      - caddy-config:/config
+
+volumes:
+  game-data:
+  caddy-data:
+  caddy-config:

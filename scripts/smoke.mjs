@@ -79,10 +79,18 @@ check('non-host settings -> NOT_HOST',
   (await emit(guest, 'room:settings', { rounds: 9 })).code === 'NOT_HOST');
 check('non-host start -> NOT_HOST',
   (await emit(guest, 'room:start', {})).code === 'NOT_HOST');
+const guestSees = nextEvent(guest, 'room:state');
 check('host settings accepted', (await emit(host, 'room:settings', { rounds: 5 })).ok === true);
 const after = await nextEvent(host, 'room:state');
 check('settings broadcast to room', after.settings.rounds === 5);
 check('totalRounds follows settings', after.round.totalRounds === 5);
+// Regression: the broadcast used to carry the HOST's id as everyone's `you`,
+// so every guest believed it was the host for the rest of the game.
+const seen = await guestSees;
+check('settings broadcast keeps each player\'s own identity',
+  seen.settings.rounds === 5 && seen.you.playerId === guestId,
+  `guest told it is ${seen.you.playerId}, expected ${guestId}`);
+check('host keeps its own identity', after.you.playerId === hostPlayerId);
 check('out-of-range setting rejected',
   (await emit(host, 'room:settings', { rounds: 999 })).code === 'INVALID');
 check('host start with 2 players ok', (await emit(host, 'room:start', {})).ok === true);
@@ -124,9 +132,10 @@ const d2 = await connect();
 await emit(d2, 'room:join', { roomCode: dCode, name: 'Watcher', avatar: 4 });
 await nextEvent(d2, 'room:state');
 
+// Points are flat, quantized pairs: [x0, y0, x1, y1, ...] on a 0..10000 grid.
 const stroke = (id) => ({
   id, drawerId: 'spoofed', tool: 'brush', color: '#2f6f4f', size: 0.01,
-  points: [{ x: 0.1, y: 0.1 }, { x: 0.5, y: 0.6 }],
+  points: [1000, 1000, 5000, 6000],
 });
 
 const relayed = nextEvent(d2, 'draw:stroke');
@@ -139,10 +148,23 @@ const badStroke = nextEvent(d1, 'error:toast');
 d1.emit('draw:stroke', { stroke: { ...stroke('s2'), color: 'red' } });
 check('malformed stroke rejected', (await badStroke).code === 'INVALID');
 
-// same id twice = one entry (live streaming), not two
-const grown = nextEvent(d2, 'draw:stroke');
-d1.emit('draw:stroke', { stroke: { ...stroke('s1'), points: [{x:0.1,y:0.1},{x:0.5,y:0.6},{x:0.9,y:0.2}] } });
-check('restreamed stroke keeps one id', (await grown).stroke.points.length === 3);
+const badPoints = nextEvent(d1, 'error:toast');
+d1.emit('draw:stroke', { stroke: { ...stroke('s2'), points: [0.1, 0.2] } });
+check('non-integer points rejected', (await badPoints).code === 'INVALID');
+
+// a live drag sends only its new points, under the same id
+const appended = nextEvent(d2, 'draw:points');
+d1.emit('draw:points', { id: 's1', points: [9000, 2000] });
+const app = await appended;
+check('appended points relay as a delta', app.strokeId === 's1' && app.points.length === 2);
+
+const foreign = nextEvent(d1, 'error:toast');
+d1.emit('draw:points', { id: 'nope', points: [1, 1] });
+check('append to unknown stroke rejected', (await foreign).code === 'INVALID');
+
+const tooLong = nextEvent(d1, 'error:toast');
+d1.emit('draw:points', { id: 's1', points: new Array(1200).fill(5000) });
+check('per-stroke point cap enforced', (await tooLong).code === 'INVALID');
 
 d1.emit('draw:stroke', { stroke: stroke('s3') });
 await new Promise(r => setTimeout(r, 120));
@@ -158,11 +180,26 @@ const synced = await sync;
 check('late joiner receives stroke log',
   synced.strokes.length === 1 && synced.strokes[0].id === 's1',
   JSON.stringify(synced.strokes.map(s => s.id)));
+check('stroke log includes appended points', synced.strokes[0].points.length === 6,
+  `got ${synced.strokes[0].points.length / 2} points`);
 
 const cleared = nextEvent(d2, 'draw:clear');
 d1.emit('draw:clear', {});
 await cleared;
 check('clear broadcasts', true);
+
+// one socket, one seat: entering a new room must unsubscribe from the old one
+const roster2P = nextEvent(d1, 'room:players');
+const hopState = nextEvent(d3, 'room:state');
+const hop = await emit(d3, 'room:create', { name: 'Hopper', avatar: 1 });
+await hopState;
+let leaked = false;
+d3.on('chat:message', (m) => { if (m.text.includes('still here')) leaked = true; });
+const roster2 = await roster2P;
+check('room hop marks old seat away', roster2.players.find((p) => p.name === 'Latecomer')?.connected === false);
+d1.emit('chat:guess', { text: 'still here' });
+await new Promise(r => setTimeout(r, 200));
+check('room hop stops old room traffic', hop.ok && !leaked);
 d1.disconnect(); d2.disconnect(); d3.disconnect();
 
 console.log(`\n${pass} passed, ${failures.length} failed`);

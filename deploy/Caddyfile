@@ -1,0 +1,23 @@
+# DOMAIN=game.example.com gets automatic HTTPS (DNS must point here first).
+# DOMAIN=:80 serves plain HTTP on the server's IP, e.g. before DNS is ready.
+{$DOMAIN}
+
+# Backend: REST and Socket.IO. Caddy proxies WebSocket upgrades as-is and
+# appends the client address to X-Forwarded-For.
+@backend path /api/* /socket.io/*
+handle @backend {
+	reverse_proxy backend:3001
+}
+
+# Frontend: the static bundle. Hashed assets cache forever; the HTML never
+# does, so a deploy is picked up on the next page load.
+handle {
+	root * /srv
+	encode zstd gzip
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+	@html not path /assets/*
+	header @html Cache-Control "no-cache"
+	try_files {path} /index.html
+	file_server
+}

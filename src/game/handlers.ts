@@ -1,23 +1,26 @@
 import type { Server, Socket } from 'socket.io';
 import { z } from 'zod';
-import type {
-  ChatMessage,
-  ClientToServerEvents,
-  Failure,
-  ServerToClientEvents,
+import {
+  MAX_POINTS_PER_STROKE,
+  type ChatMessage,
+  type ClientToServerEvents,
+  type Failure,
+  type ServerToClientEvents,
 } from '../contract/index.js';
 import {
-  StrokeSchema,
-  upsertStroke,
+  appendPoints,
   assertMayDraw,
   clearStrokes,
+  parsePoints,
+  parseStroke,
+  startStroke,
   undoStroke,
 } from './drawing.js';
 import { allow, forgetSocket } from './limits.js';
 import type { RoundEngine } from './round.js';
 import { StoreError, store } from './store.js';
 import type { PlayerRecord, Room } from './types.js';
-import { reportSuggestion } from './words.js';
+import { reportWord } from './words.js';
 
 type IO = Server<ClientToServerEvents, ServerToClientEvents>;
 type Sock = Socket<ClientToServerEvents, ServerToClientEvents>;
@@ -25,6 +28,8 @@ type Sock = Socket<ClientToServerEvents, ServerToClientEvents>;
 const Name = z.string().trim().min(1, 'Name required').max(20);
 const Avatar = z.number().int().min(0).max(11);
 const Code = z.string().trim().toUpperCase().min(4).max(6);
+/** Optional and untrusted: only ever compared for equality, never shown. */
+const DeviceId = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/).optional().catch(undefined);
 
 const SettingsPatch = z
   .object({
@@ -68,7 +73,29 @@ function systemMessage(text: string): ChatMessage {
   };
 }
 
+/**
+ * `room:state` carries `you`, so it can never be a room-wide broadcast: sent
+ * that way, every recipient was told it was whoever triggered the change — the
+ * host, after any settings edit — and every guest's client then believed it was
+ * the host for the rest of the game. Each seat gets its own copy instead.
+ */
+export function emitStateToEach(io: IO, room: Room): void {
+  const players = store.publicPlayers(room);
+  for (const p of room.players.values()) {
+    if (!p.socketId) continue;
+    io.sockets.sockets.get(p.socketId)?.emit('room:state', {
+      roomCode: room.code,
+      players,
+      settings: room.settings,
+      round: room.round,
+      you: { playerId: p.id },
+    });
+  }
+}
+
 export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): void {
+  const ip = (socket.data as { ip?: string }).ip ?? socket.handshake.address;
+
   /** Full snapshot to one socket; everyone else just needs the roster. */
   const sendState = (room: Room, player: PlayerRecord) => {
     socket.emit('room:state', {
@@ -82,16 +109,35 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
   const broadcastPlayers = (room: Room) => {
     io.to(room.code).emit('room:players', { players: store.publicPlayers(room) });
   };
+  const toast = (e: unknown) => {
+    const f = toFailure(e);
+    socket.emit('error:toast', { code: f.code, message: f.message });
+  };
+
+  /**
+   * One socket, one seat. Entering a second room without leaving the first
+   * used to keep the socket subscribed to both, so it received — and applied —
+   * the old room's strokes and ticks, which carry no room code.
+   */
+  const leaveCurrent = () => {
+    const prev = store.disconnect(socket.id, true);
+    if (!prev) return;
+    void socket.leave(prev.room.code);
+    broadcastPlayers(prev.room);
+    engine.playerLeft(prev.room);
+  };
 
   socket.on('room:create', (payload, ack) => {
     try {
-      if (!allow(socket.id, 'room:create')) {
+      if (!allow(socket.id, 'room:create', ip)) {
         ack(fail('RATE_LIMITED', 'Too many rooms, too fast'));
         return;
       }
       const name = Name.parse(payload?.name);
       const avatar = Avatar.parse(payload?.avatar);
-      const { room, player } = store.create(name, avatar, socket.id);
+      const deviceId = DeviceId.parse(payload?.deviceId) ?? null;
+      leaveCurrent();
+      const { room, player } = store.create(name, avatar, socket.id, deviceId);
       void socket.join(room.code);
       ack({ ok: true, roomCode: room.code, token: player.token });
       sendState(room, player);
@@ -103,10 +149,17 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
 
   socket.on('room:join', (payload, ack) => {
     try {
+      if (!allow(socket.id, 'room:join', ip)) {
+        ack(fail('RATE_LIMITED', 'Too many attempts — wait a moment'));
+        return;
+      }
       const code = Code.parse(payload?.roomCode);
       const name = Name.parse(payload?.name);
       const avatar = Avatar.parse(payload?.avatar);
-      const { room, player } = store.join(code, name, avatar, socket.id);
+      const deviceId = DeviceId.parse(payload?.deviceId) ?? null;
+      const current = store.seatOf(socket.id);
+      if (current && current.room.code !== code) leaveCurrent();
+      const { room, player } = store.join(code, name, avatar, socket.id, deviceId);
       void socket.join(room.code);
       ack({ ok: true, token: player.token });
       sendState(room, player);
@@ -118,20 +171,63 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
     }
   });
 
+  /** Invite pages ask what a code points at before showing a join button. */
+  socket.on('room:peek', (payload, ack) => {
+    try {
+      // Shares the join budget: peeking is the cheap way to probe codes.
+      if (!allow(socket.id, 'room:join', ip)) {
+        ack(fail('RATE_LIMITED', 'Too many attempts — wait a moment'));
+        return;
+      }
+      const code = Code.parse(payload?.roomCode);
+      ack({ ok: true, ...store.preview(code) });
+    } catch (e) {
+      ack(toFailure(e));
+    }
+  });
+
+  socket.on('player:update', (payload, ack) => {
+    try {
+      if (!allow(socket.id, 'player:update')) {
+        ack(fail('RATE_LIMITED', 'Slow down a moment'));
+        return;
+      }
+      const patch = z
+        .object({ name: Name.optional(), avatar: Avatar.optional() })
+        .parse(payload ?? {});
+      const { room, player } = seatOf(socket);
+      const before = player.name;
+      store.updatePlayer(room, player, patch);
+      ack({ ok: true });
+      broadcastPlayers(room);
+      if (player.name !== before) {
+        io.to(room.code).emit('chat:message', systemMessage(`${before} is now ${player.name}`));
+      }
+    } catch (e) {
+      ack(toFailure(e));
+    }
+  });
+
   /** Refresh survival: the token identifies the seat, the socket is disposable. */
   socket.on('room:resume', (payload, ack) => {
     try {
+      if (!allow(socket.id, 'room:resume', ip)) {
+        ack(fail('RATE_LIMITED', 'Too many attempts — wait a moment'));
+        return;
+      }
       const code = Code.parse(payload?.roomCode);
-      const token = z.string().min(8).parse(payload?.token);
+      const token = z.string().min(8).max(64).parse(payload?.token);
+      const current = store.seatOf(socket.id);
+      if (current && current.room.code !== code) leaveCurrent();
       const { room, player } = store.resume(code, token, socket.id);
       void socket.join(room.code);
       ack({ ok: true, playerId: player.id });
       sendState(room, player);
       broadcastPlayers(room);
-      // Mid-round joiners need the drawing so far (M3 fills strokes).
-      if (room.strokes.length) {
-        socket.emit('draw:sync', { strokes: room.strokes });
-      }
+      // Always the authoritative drawing, even when it is empty: whatever the
+      // client drew while offline was never seen here, and a canvas cleared
+      // during the drop must come back cleared.
+      socket.emit('draw:sync', { strokes: room.strokes });
       // ...and a returning drawer needs the word or the choices back.
       engine.resendTurnContext(room, player);
     } catch (e) {
@@ -141,17 +237,15 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
 
   socket.on('room:settings', (payload, ack) => {
     try {
+      if (!allow(socket.id, 'room:settings')) {
+        ack(fail('RATE_LIMITED', 'Slow down a moment'));
+        return;
+      }
       const patch = SettingsPatch.parse(payload ?? {});
       const { room, player } = seatOf(socket);
-      const settings = store.updateSettings(room, player.id, patch);
+      store.updateSettings(room, player.id, patch);
       ack({ ok: true });
-      io.to(room.code).emit('room:state', {
-        roomCode: room.code,
-        players: store.publicPlayers(room),
-        settings,
-        round: room.round,
-        you: { playerId: player.id },
-      });
+      emitStateToEach(io, room);
     } catch (e) {
       ack(toFailure(e));
     }
@@ -192,26 +286,25 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       }
       const { room, player } = seatOf(socket);
       const text = z.string().min(1).max(60).parse(payload?.text);
-      try {
-        engine.custom(room, player, text);
-      } catch (e) {
-        // Rejections are the interesting half: they are the filter getting in
-        // someone's way, which is invisible from the accepted ones alone.
-        throw e;
-      }
+      engine.custom(room, player, text);
       ack({ ok: true });
     } catch (e) {
       ack(toFailure(e));
     }
   });
 
+  /** One report per player per turn, for dictionary and custom words alike. */
   socket.on('word:report', (payload, ack) => {
     try {
-      const { room } = seatOf(socket);
+      if (!allow(socket.id, 'word:report')) {
+        ack(fail('RATE_LIMITED', 'Slow down a moment'));
+        return;
+      }
+      const { room, player } = seatOf(socket);
       z.string().max(200).parse(payload?.reason ?? '');
-      if (room.active) {
-        reportSuggestion(room.active.normalized);
-        const { player } = seatOf(socket);
+      if (room.active && !room.reportedBy.has(player.id)) {
+        room.reportedBy.add(player.id);
+        reportWord(room.active);
       }
       ack({ ok: true });
     } catch (e) {
@@ -226,8 +319,7 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       const text = z.string().min(1).max(120).parse(payload?.text);
       engine.guess(room, player, text);
     } catch (e) {
-      const f = toFailure(e);
-      socket.emit('error:toast', { code: f.code, message: f.message });
+      toast(e);
     }
   });
 
@@ -238,38 +330,55 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       if (!allow(socket.id, 'draw:stroke')) return;
       const { room, player } = seatOf(socket);
       assertMayDraw(room, player);
-      const stroke = StrokeSchema.parse(payload?.stroke);
+      const stroke = parseStroke(payload?.stroke);
       // Trust the seat, not the claim: a client could assert any drawerId.
       stroke.drawerId = player.id;
-      upsertStroke(room, stroke);
+      startStroke(room, stroke);
       socket.to(room.code).emit('draw:stroke', { stroke });
     } catch (e) {
-      const f = toFailure(e);
-      socket.emit('error:toast', { code: f.code, message: f.message });
+      toast(e);
+    }
+  });
+
+  /**
+   * The hot path: a live drag sends only its new points every ~40 ms. Relayed
+   * as-is, so the cost per message is independent of how long the stroke is.
+   */
+  socket.on('draw:points', (payload) => {
+    try {
+      if (!allow(socket.id, 'draw:points')) return;
+      const { room, player } = seatOf(socket);
+      assertMayDraw(room, player);
+      const id = z.string().min(1).max(40).parse(payload?.id);
+      const points = parsePoints(payload?.points, MAX_POINTS_PER_STROKE);
+      appendPoints(room, player.id, id, points);
+      socket.to(room.code).emit('draw:points', { strokeId: id, points });
+    } catch (e) {
+      toast(e);
     }
   });
 
   socket.on('draw:undo', () => {
     try {
+      if (!allow(socket.id, 'draw:undo')) return;
       const { room, player } = seatOf(socket);
       assertMayDraw(room, player);
       const strokeId = undoStroke(room, player.id);
       if (strokeId) io.to(room.code).emit('draw:undo', { strokeId });
     } catch (e) {
-      const f = toFailure(e);
-      socket.emit('error:toast', { code: f.code, message: f.message });
+      toast(e);
     }
   });
 
   socket.on('draw:clear', () => {
     try {
+      if (!allow(socket.id, 'draw:clear')) return;
       const { room, player } = seatOf(socket);
       assertMayDraw(room, player);
       clearStrokes(room);
       io.to(room.code).emit('draw:clear', {});
     } catch (e) {
-      const f = toFailure(e);
-      socket.emit('error:toast', { code: f.code, message: f.message });
+      toast(e);
     }
   });
 
@@ -282,13 +391,8 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
     try {
       if (!allow(socket.id, 'client:error')) return;
       const body = ClientError.parse(payload);
-      let who = 'unseated';
-      try {
-        const seat = seatOf(socket);
-        who = `${seat.player.name}@${seat.room.code}`;
-      } catch {
-        /* reported before joining a room — still worth printing */
-      }
+      const seat = store.seatOf(socket.id);
+      const who = seat ? `${seat.player.name}@${seat.room.code}` : 'unseated';
       console.warn(`[client] ${body.source} from ${who}: ${body.message}`);
     } catch {
       /* a broken error report must not become a second error */
@@ -297,7 +401,9 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
 
   socket.on('disconnect', (reason) => {
     forgetSocket(socket.id);
-    const res = store.disconnect(socket.id);
+    // The client calling disconnect() is the Leave button; anything else (a
+    // refresh, a dropped connection) may come straight back.
+    const res = store.disconnect(socket.id, reason === 'client namespace disconnect');
     if (!res) return;
     const { room, player } = res;
     broadcastPlayers(room);
@@ -307,19 +413,9 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
   });
 }
 
-/** Resolves the socket back to its seat, or fails loudly. */
+/** Resolves the socket back to its seat in O(1), or fails loudly. */
 function seatOf(socket: Sock): { room: Room; player: PlayerRecord } {
-  for (const code of socket.rooms) {
-    if (code === socket.id) continue;
-    try {
-      const room = store.get(code);
-      const player = [...room.players.values()].find(
-        (p) => p.socketId === socket.id,
-      );
-      if (player) return { room, player };
-    } catch {
-      /* not a game room */
-    }
-  }
-  throw new StoreError('ROOM_NOT_FOUND', 'You are not in a room');
+  const seat = store.seatOf(socket.id);
+  if (!seat) throw new StoreError('ROOM_NOT_FOUND', 'You are not in a room');
+  return seat;
 }

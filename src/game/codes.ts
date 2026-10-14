@@ -3,7 +3,8 @@ import { customAlphabet } from 'nanoid';
 /**
  * Ambiguous glyphs removed (I/1, O/0, S/5, B/8, Z/2) — room codes get read
  * aloud and typed from memory, so legibility beats keyspace. 26^4 of the
- * remaining alphabet is ~1.2M, far beyond concurrent-room needs.
+ * remaining alphabet is ~457k, far beyond concurrent-room needs. Joins are
+ * rate limited per IP so live codes cannot be found by enumeration.
  */
 const ALPHABET = 'ACDEFGHJKLMNPQRTUVWXY34679';
 const gen = customAlphabet(ALPHABET, 4);

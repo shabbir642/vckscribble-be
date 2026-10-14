@@ -81,7 +81,7 @@ const tick = await next(b, 'round:tick', 2500);
 check('server ticks the clock', typeof tick.secondsLeft === 'number' && tick.secondsLeft > 0);
 check('non-drawer cannot draw during round', await (async () => {
   const toast = next(b, 'error:toast', 2000);
-  b.emit('draw:stroke', { stroke: { id: 'x1', drawerId: 'z', tool: 'brush', color: '#000000', size: 0.01, points: [{x:0.2,y:0.2}] } });
+  b.emit('draw:stroke', { stroke: { id: 'x1', drawerId: 'z', tool: 'brush', color: '#000000', size: 0.01, points: [2000, 2000] } });
   return (await toast).code === 'NOT_DRAWER';
 })());
 

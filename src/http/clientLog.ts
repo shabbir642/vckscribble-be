@@ -15,6 +15,11 @@ const seen = new Map<string, { n: number; since: number }>();
 const WINDOW_MS = 60_000;
 const MAX_PER_WINDOW = 20;
 
+/** Forget addresses whose window has lapsed, so the map stays bounded. */
+export function sweepClientLog(now = Date.now()): void {
+  for (const [ip, rec] of seen) if (now - rec.since > WINDOW_MS) seen.delete(ip);
+}
+
 function overLimit(ip: string): boolean {
   const now = Date.now();
   const rec = seen.get(ip);

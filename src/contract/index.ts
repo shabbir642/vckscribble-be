@@ -8,7 +8,7 @@
  * Keep this file dependency-free so both repos can consume it as-is.
  */
 
-export const CONTRACT_VERSION = 4;
+export const CONTRACT_VERSION = 6;
 
 /* ---------------------------------------------------------------- domain */
 
@@ -33,10 +33,18 @@ export interface Player {
   isHost: boolean;
 }
 
-export interface Point {
-  x: number;
-  y: number;
-}
+/**
+ * Coordinates are quantized to integers on a 0..COORD_SCALE grid and packed
+ * flat: `[x0, y0, x1, y1, ...]`. Integers serialize to 1-5 characters instead
+ * of a 17-digit double, and a flat array of small ints is a packed SMI array in
+ * V8 rather than one heap object per point — roughly 4x smaller on the wire and
+ * far smaller in memory. 10000 steps is finer than any canvas renders.
+ */
+export const COORD_SCALE = 10_000;
+/** A drag longer than this is split by the client into consecutive strokes. */
+export const MAX_POINTS_PER_STROKE = 600;
+/** Total budget per room, across all strokes: the real memory guard. */
+export const MAX_POINTS_PER_ROOM = 60_000;
 
 export interface Stroke {
   id: string;
@@ -44,7 +52,8 @@ export interface Stroke {
   tool: Tool;
   color: string;
   size: number;
-  points: Point[];
+  /** Flat quantized pairs: [x0, y0, x1, y1, ...], each 0..COORD_SCALE. */
+  points: number[];
 }
 
 export interface RoomSettings {
@@ -96,6 +105,20 @@ export interface ChatMessage {
   at: number;
 }
 
+export interface RoomPreview {
+  roomCode: string;
+  hostName: string | null;
+  /** Players currently connected. */
+  players: number;
+  maxPlayers: number;
+  phase: RoundPhase;
+}
+
+/** Canonical invite link for a room: `<origin>/?room=CODE`. */
+export function inviteUrl(origin: string, roomCode: string): string {
+  return `${origin}/?room=${encodeURIComponent(roomCode.toUpperCase())}`;
+}
+
 export interface WordChoice {
   id: number;
   text: string;
@@ -116,13 +139,26 @@ export interface ClientToServerEvents {
     detail?: string;
     url?: string;
   }) => void;
+  /**
+   * What an invite link points at, before joining: lets the invite page say
+   * "Join Ann's room (3 players)" — or "this link has expired" — up front.
+   */
+  'room:peek': (
+    p: { roomCode: string },
+    ack: (r: Result<RoomPreview>) => void,
+  ) => void;
+
+  /**
+   * `deviceId` is a random id the browser keeps forever. It lets a returning
+   * player reclaim their seat even after their session token is gone.
+   */
   'room:create': (
-    p: { name: string; avatar: number },
+    p: { name: string; avatar: number; deviceId?: string },
     ack: (r: Result<{ roomCode: string; token: string }>) => void,
   ) => void;
 
   'room:join': (
-    p: { roomCode: string; name: string; avatar: number },
+    p: { roomCode: string; name: string; avatar: number; deviceId?: string },
     ack: (r: Result<{ token: string }>) => void,
   ) => void;
 
@@ -132,6 +168,8 @@ export interface ClientToServerEvents {
   ) => void;
 
   'room:settings': (p: Partial<RoomSettings>, ack: Ack) => void;
+  /** Change your own name/avatar. Only before a game starts (lobby/finished). */
+  'player:update': (p: { name?: string; avatar?: number }, ack: Ack) => void;
   'room:start': (p: Record<string, never>, ack: Ack) => void;
 
   /** Pick one of the three offered words. */
@@ -139,7 +177,13 @@ export interface ClientToServerEvents {
   /** Requirement 1: drawer writes their own instead. */
   'word:custom': (p: { text: string }, ack: Ack) => void;
 
+  /** Starts a stroke (or replaces one of your own by id). */
   'draw:stroke': (p: { stroke: Stroke }) => void;
+  /**
+   * Appends points to one of your own strokes. Only the new points travel —
+   * resending the whole stroke made a drag's upload grow quadratically.
+   */
+  'draw:points': (p: { id: string; points: number[] }) => void;
   'draw:undo': (p: Record<string, never>) => void;
   'draw:clear': (p: Record<string, never>) => void;
 
@@ -169,6 +213,7 @@ export interface ServerToClientEvents {
   'word:assigned': (p: { text: string }) => void;
 
   'draw:stroke': (p: { stroke: Stroke }) => void;
+  'draw:points': (p: { strokeId: string; points: number[] }) => void;
   'draw:undo': (p: { strokeId: string }) => void;
   'draw:clear': (p: Record<string, never>) => void;
   /** Full replay for late joiners / reconnects. */

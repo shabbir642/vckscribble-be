@@ -11,6 +11,8 @@ export interface PlayerRecord extends Player {
   token: string;
   socketId: string | null;
   lastSeen: number;
+  /** The browser's persistent id, if it sent one; reclaims seats. */
+  deviceId: string | null;
 }
 
 export interface ActiveWord {
@@ -30,6 +32,10 @@ export interface Room {
   settings: RoomSettings;
   round: RoundState;
   strokes: Stroke[];
+  /** id -> stroke, so appends and restarts resolve in O(1). */
+  strokeIndex: Map<string, Stroke>;
+  /** Sum of points across `strokes`, checked against MAX_POINTS_PER_ROOM. */
+  pointCount: number;
   createdAt: number;
   lastActivity: number;
 
@@ -55,4 +61,6 @@ export interface Room {
   customCounts: Record<string, number>;
   /** Points the drawer has earned this turn, for the per-turn cap. */
   drawerEarned: number;
+  /** Players who reported the current word; one report each per turn. */
+  reportedBy: Set<string>;
 }

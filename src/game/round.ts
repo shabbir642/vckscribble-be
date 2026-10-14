@@ -8,6 +8,7 @@ import {
   maskWord,
   normalizeWord,
 } from '../contract/index.js';
+import { clearStrokes } from './drawing.js';
 import { StoreError, store } from './store.js';
 import type { PlayerRecord, Room } from './types.js';
 import {
@@ -143,9 +144,10 @@ export class RoundEngine {
 
   private beginSelection(room: Room): void {
     this.advance(room);
-    room.strokes = [];
+    clearStrokes(room);
     room.revealed = [];
     room.active = null;
+    room.reportedBy.clear();
     this.io.to(room.code).emit('draw:clear', {});
 
     const drawer = this.currentDrawer(room);
@@ -634,7 +636,7 @@ export class RoundEngine {
       guessedPlayerIds: [],
     };
     room.active = null;
-    room.strokes = [];
+    clearStrokes(room);
     this.publish(room);
     this.io.to(room.code).emit('draw:clear', {});
   }

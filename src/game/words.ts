@@ -1,3 +1,4 @@
+import type { Statement } from 'better-sqlite3';
 import { sqlite } from '../db/index.js';
 import {
   WORD_MAX,
@@ -7,6 +8,24 @@ import {
   normalizeWord,
 } from '../contract/index.js';
 import { StoreError } from './store.js';
+import type { ActiveWord } from './types.js';
+
+/**
+ * better-sqlite3 is synchronous, so every query here runs on the event loop
+ * that also relays strokes for every room. Statements are compiled once and
+ * reused; the word-choice SQL varies with the exclusion list, so it is cached
+ * by text.
+ */
+const stmtCache = new Map<string, Statement<unknown[]>>();
+function stmt(sql: string): Statement<unknown[]> {
+  let s = stmtCache.get(sql);
+  if (!s) {
+    s = sqlite.prepare(sql);
+    if (stmtCache.size > 500) stmtCache.clear();
+    stmtCache.set(sql, s);
+  }
+  return s;
+}
 
 /**
  * Deliberately small and explicit. It blocks the obvious, and the in-game
@@ -81,7 +100,7 @@ export function pickChoices(usedIds: number[], count = 3): WordChoice[] {
       ORDER BY times_drawn ASC, RANDOM()
       LIMIT 1`;
     const args = tier === null ? skip : [...skip, tier];
-    return sqlite.prepare(sql).get(...args) as WordRow | undefined;
+    return stmt(sql).get(...args) as WordRow | undefined;
   };
 
   for (const tier of tiers) {
@@ -98,8 +117,7 @@ export function pickChoices(usedIds: number[], count = 3): WordChoice[] {
 }
 
 export function wordById(id: number): WordChoice | null {
-  const row = sqlite
-    .prepare('SELECT id, text, drawability FROM words WHERE id = ? AND enabled = 1')
+  const row = stmt('SELECT id, text, drawability FROM words WHERE id = ? AND enabled = 1')
     .get(id) as WordRow | undefined;
   return row
     ? { id: row.id, text: row.text, drawability: row.drawability as Drawability }
@@ -108,12 +126,12 @@ export function wordById(id: number): WordChoice | null {
 
 export function markDrawn(wordId: number | null): void {
   if (wordId === null) return;
-  sqlite.prepare('UPDATE words SET times_drawn = times_drawn + 1 WHERE id = ?').run(wordId);
+  stmt('UPDATE words SET times_drawn = times_drawn + 1 WHERE id = ?').run(wordId);
 }
 
 export function markGuessed(wordId: number | null): void {
   if (wordId === null) return;
-  sqlite.prepare('UPDATE words SET times_guessed = times_guessed + 1 WHERE id = ?').run(wordId);
+  stmt('UPDATE words SET times_guessed = times_guessed + 1 WHERE id = ?').run(wordId);
 }
 
 /**
@@ -142,32 +160,35 @@ export function acceptCustomWord(
   }
 
   // A disabled word was retired on purpose; let it stay retired.
-  const retired = sqlite
-    .prepare('SELECT 1 FROM words WHERE normalized = ? AND enabled = 0')
+  const retired = stmt('SELECT 1 FROM words WHERE normalized = ? AND enabled = 0')
     .get(normalized);
   if (retired) {
     throw new StoreError('WORD_RETIRED', 'That word was retired — pick another');
   }
 
-  sqlite
-    .prepare(
-      `INSERT INTO suggestions (text, normalized, submitted_by, room_code)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT(normalized) DO UPDATE SET times_used = times_used + 1`,
-    )
-    .run(clean, normalized, submittedBy, roomCode);
+  stmt(
+    `INSERT INTO suggestions (text, normalized, submitted_by, room_code)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(normalized) DO UPDATE SET times_used = times_used + 1`,
+  ).run(clean, normalized, submittedBy, roomCode);
 
   return clean;
 }
 
 export function markSuggestionGuessed(normalized: string): void {
-  sqlite
-    .prepare('UPDATE suggestions SET times_guessed = times_guessed + 1 WHERE normalized = ?')
+  stmt('UPDATE suggestions SET times_guessed = times_guessed + 1 WHERE normalized = ?')
     .run(normalized);
 }
 
-export function reportSuggestion(normalized: string): void {
-  sqlite
-    .prepare('UPDATE suggestions SET reported = reported + 1 WHERE normalized = ?')
-    .run(normalized);
+/**
+ * A report lands on whichever table the word came from. It used to touch only
+ * `suggestions`, so reporting a dictionary word silently did nothing.
+ */
+export function reportWord(active: ActiveWord): void {
+  if (active.custom || active.wordId === null) {
+    stmt('UPDATE suggestions SET reported = reported + 1 WHERE normalized = ?')
+      .run(active.normalized);
+  } else {
+    stmt('UPDATE words SET reported = reported + 1 WHERE id = ?').run(active.wordId);
+  }
 }

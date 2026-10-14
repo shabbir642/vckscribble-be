@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 import cors from 'cors';
 import express from 'express';
 import { Server } from 'socket.io';
@@ -9,13 +10,16 @@ import type {
 import { CONTRACT_VERSION } from './contract/index.js';
 import { ensureSchema, sqlite } from './db/index.js';
 import { seedWords } from './db/seed.js';
-import { clientLogRouter } from './http/clientLog.js';
+import { clientLogRouter, sweepClientLog } from './http/clientLog.js';
 import { wordsRouter } from './http/words.js';
 import { registerHandlers } from './game/handlers.js';
+import { closeConnection, openConnection, sweepLimits } from './game/limits.js';
 import { RoundEngine } from './game/round.js';
 import { store } from './game/store.js';
 
 const PORT = Number(process.env.PORT ?? 3001);
+/** Set to 1 only when a reverse proxy (Caddy in deploy/) is the sole ingress. */
+const TRUST_PROXY = process.env.TRUST_PROXY === '1';
 /**
  * Comma-separated so one deployment can serve several origins — in practice
  * localhost plus the machine's LAN address, which is how anyone else on the
@@ -34,21 +38,37 @@ console.log(
 );
 
 const app = express();
-// Behind Fly/Railway's proxy, so client IPs come from X-Forwarded-For.
-app.set('trust proxy', 1);
+// Behind the reverse proxy (TRUST_PROXY=1), client IPs come from X-Forwarded-For.
+app.set('trust proxy', TRUST_PROXY ? 1 : false);
 app.disable('x-powered-by');
 app.use(cors({ origin: CLIENT_ORIGIN, credentials: true }));
 app.use(express.json({ limit: '256kb' }));
 
+/**
+ * Event-loop delay is the number that matters for a single-threaded relay:
+ * every room shares this one loop, so when it stalls, everyone lags at once.
+ */
+const LOOP_RESOLUTION_MS = 20;
+const loopDelay = monitorEventLoopDelay({ resolution: LOOP_RESOLUTION_MS });
+loopDelay.enable();
+/** The histogram includes the sampling interval itself; report only the lag. */
+const lagMs = (ns: number) => Math.max(0, +(ns / 1e6 - LOOP_RESOLUTION_MS).toFixed(1));
+const enabledWords = sqlite.prepare('SELECT COUNT(*) AS c FROM words WHERE enabled = 1');
+
 app.get('/api/health', (_req, res) => {
-  const { c } = sqlite
-    .prepare('SELECT COUNT(*) AS c FROM words WHERE enabled = 1')
-    .get() as { c: number };
+  const { c } = enabledWords.get() as { c: number };
   res.json({
     ok: true,
     contractVersion: CONTRACT_VERSION,
     enabledWords: c,
     rooms: store.size,
+    sockets: io.engine.clientsCount,
+    heapMb: Math.round(process.memoryUsage().heapUsed / 1048576),
+    loopLagMs: {
+      p50: lagMs(loopDelay.percentile(50)),
+      p99: lagMs(loopDelay.percentile(99)),
+      max: lagMs(loopDelay.max),
+    },
   });
 });
 
@@ -59,10 +79,45 @@ const httpServer = createServer(app);
 
 export const io = new Server<ClientToServerEvents, ServerToClientEvents>(
   httpServer,
-  { cors: { origin: CLIENT_ORIGIN, credentials: true } },
+  {
+    cors: { origin: CLIENT_ORIGIN, credentials: true },
+    // Socket.IO parses a message before any handler (and so any rate limit)
+    // sees it. The default 1 MB let one client make the server parse junk
+    // for free; the largest legitimate message is a 600-point stroke, ~8 KB.
+    maxHttpBufferSize: 100_000,
+  },
 );
 
+/**
+ * Behind the reverse proxy every socket comes from the proxy's address; the
+ * real client is the last X-Forwarded-For hop, which the proxy appends. Only
+ * trusted with TRUST_PROXY=1 — exposed directly, a client could forge it and
+ * dodge the per-IP limits.
+ */
+function clientIp(headers: Record<string, string | string[] | undefined>, fallback: string) {
+  if (!TRUST_PROXY) return fallback;
+  const xff = headers['x-forwarded-for'];
+  const last = (Array.isArray(xff) ? xff.join(',') : xff)?.split(',').pop()?.trim();
+  return last || fallback;
+}
+
+io.use((socket, next) => {
+  const ip = clientIp(socket.handshake.headers, socket.handshake.address);
+  if (!openConnection(ip)) {
+    next(new Error('Too many connections from your network'));
+    return;
+  }
+  (socket.data as { ip?: string }).ip = ip;
+  socket.once('disconnect', () => closeConnection(ip));
+  next();
+});
+
 const engine = new RoundEngine(io);
+
+// A host who did not come back within their grace has handed the role on.
+store.onHostChange = (room) => {
+  io.to(room.code).emit('room:players', { players: store.publicPlayers(room) });
+};
 
 io.on('connection', (socket) => {
   registerHandlers(io, socket, engine);
@@ -85,6 +140,9 @@ ticker.unref();
 /** Reaps abandoned lobby seats and dead rooms; see RoomStore.sweep. */
 const sweeper = setInterval(() => {
   const { droppedPlayers, droppedRooms } = store.sweep();
+  sweepLimits();
+  loopDelay.reset();
+  sweepClientLog();
   // A collected room must not leave round timers running.
   for (const code of droppedRooms) engine.dispose(code);
   if (droppedPlayers || droppedRooms.length) {

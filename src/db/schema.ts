@@ -32,6 +32,8 @@ export const words = sqliteTable(
       .default('seed'),
     timesDrawn: integer('times_drawn').notNull().default(0),
     timesGuessed: integer('times_guessed').notNull().default(0),
+    /** In-game reports; review alongside guess_pct when retiring words. */
+    reported: integer('reported').notNull().default(0),
     createdAt: integer('created_at')
       .notNull()
       .default(sql`(unixepoch())`),

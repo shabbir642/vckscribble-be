@@ -73,14 +73,21 @@ reviewable in diffs, and re-seeding never overwrites rows you edited by hand.
 
 ## Storage
 
-Nothing needs to survive a restart. The 235-word dictionary is seeded from
-`src/db/words.seed.ts` at every boot, so deleting the database file and starting
-again produces exactly the same game. That means the app runs happily on
-ephemeral storage, which is why the deployment has no volume attached.
+The 235-word dictionary is seeded from `src/db/words.seed.ts` at every boot
+(idempotent, never overwriting rows you edited), so a fresh database file is
+always a playable game.
 
-What a restart does throw away: `times_drawn` / `times_guessed`, any words added
-through `POST /api/words`, and custom words players invented. Attach a volume and
-point `DATABASE_URL` at it if you want those kept.
+In the VPS deployment the file lives on the `game-data` Docker volume, so word
+statistics, words added through `POST /api/words`, player-invented words and
+reports all survive restarts and redeploys — the curation queries above work
+on real history. Rooms and games are in memory and do not survive a restart.
+
+Inspect it on the server with:
+
+```bash
+docker compose -f deploy/docker-compose.yml exec backend \
+  node -e "const db=require('better-sqlite3')('/data/game.db');console.table(db.prepare('SELECT text,times_drawn,times_guessed,reported FROM words ORDER BY times_drawn DESC LIMIT 20').all())"
+```
 
 ## When something breaks
 
@@ -99,22 +106,55 @@ when none is — which is the case worth catching. Both are rate limited.
 A React render error is caught by an error boundary on the frontend, so a crash
 shows a message and a reload button rather than a white page.
 
-## Deploy
+## Deploy (VPS)
 
-Single container; the SQLite file lives on a mounted volume, without which the
-dictionary resets on every deploy.
+One Docker Compose stack in `deploy/`: Caddy terminates HTTPS (automatic
+Let's Encrypt), serves the frontend, and proxies `/api` and `/socket.io` to the
+backend. Everything is one origin, so there is no CORS to configure and no
+backend URL baked into the frontend build.
+
+Any Linux VPS with Docker works. The backend is a single Node process, so
+**one fast dedicated vCPU and 1 GB RAM** comfortably covers hundreds of
+concurrent players (see Capacity); extra cores only help Caddy.
 
 ```bash
-fly launch --no-deploy       # fly.toml is committed
-fly volumes create vckscribble_data --size 1
-fly secrets set CLIENT_ORIGIN=https://your-frontend.example
-fly secrets set WORDS_API_TOKEN="$(openssl rand -hex 24)"
-fly deploy
+# on the server, both repos side by side
+git clone https://github.com/shabbir642/vckscribble-be
+git clone https://github.com/shabbir642/vckscribble-fe
+cd vckscribble-be/deploy
+cp .env.example .env        # set DOMAIN and CLIENT_ORIGIN
+docker compose up -d --build
+docker compose logs -f backend
 ```
 
-Rooms are held in memory, so a second machine would not see the first's rooms:
-`min_machines_running = 1` and no horizontal scaling until a shared-state
-adapter (Redis) is added.
+Before the first start: point the domain's DNS A record at the server and open
+ports 80 and 443 (e.g. `ufw allow 80,443/tcp && ufw allow 443/udp`). Without a
+domain yet, set `DOMAIN=:80` and `CLIENT_ORIGIN=http://<server-ip>`.
+
+**Updating:** `git pull` in both repos, then `docker compose up -d --build`.
+Games in progress end (rooms are in memory); clients return to the home screen
+and say so. Deploy between sessions.
+
+Rooms are held in memory, so a second backend process would not see the
+first's rooms — scale up (a faster CPU), not out.
+
+## Capacity
+
+The stroke path sends only new points, as quantized integers, so the cost per
+message is independent of stroke length. Measured locally (Apple Silicon, one
+core, production build) with every room drawing continuously:
+
+| Concurrent users | Rooms | Stroke latency p50 / p99 | Server CPU | Heap |
+|---|---|---|---|---|
+| 480 | 60 | 3.8 ms / 10 ms | ~17% of a core | 61 MB |
+| 1200 | 150 | 3.2 ms / 15 ms | ~45% of a core | 88 MB |
+
+`GET /api/health` reports live `sockets`, `rooms`, `heapMb` and event-loop lag
+(`loopLagMs`) — the number to watch, since every room shares one event loop.
+
+Per-IP allowances are sized for an office behind one NAT address (1000
+sockets, 400-join burst). Raise them for bigger events with
+`IP_LIMIT_SCALE=<n>`.
 
 ## Scripts
 
@@ -125,6 +165,6 @@ adapter (Redis) is added.
 | `pnpm typecheck` | tsc --noEmit |
 | `pnpm db:seed` | seed dictionary (idempotent) |
 | `pnpm db:studio` | Drizzle Studio |
-| `pnpm smoke` | room lifecycle (29 cases, needs a running server) |
+| `pnpm smoke` | room lifecycle and drawing (37 cases, needs a running server) |
 | `pnpm smoke:game` | round machine (22 cases) |
-| `pnpm smoke:guess` | guessing & scoring (11 cases) |
+| `pnpm smoke:guess` | guessing & scoring (13 cases) |

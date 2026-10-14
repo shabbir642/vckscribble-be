@@ -9,6 +9,14 @@ mkdirSync(dirname(url), { recursive: true });
 
 export const sqlite: Database.Database = new Database(url);
 sqlite.pragma('journal_mode = WAL');
+/**
+ * Must be set explicitly. A connection that switches a *fresh* file to WAL
+ * keeps the FULL default, and production creates a fresh file at every boot —
+ * so every stats write fsynced on the event loop that relays everyone's
+ * strokes. NORMAL syncs only at checkpoints; a crash can lose the last few
+ * stat increments, never corrupt the file.
+ */
+sqlite.pragma('synchronous = NORMAL');
 sqlite.pragma('foreign_keys = ON');
 
 export const db = drizzle(sqlite, { schema });
@@ -32,6 +40,7 @@ export function ensureSchema(): void {
       source TEXT NOT NULL DEFAULT 'seed',
       times_drawn INTEGER NOT NULL DEFAULT 0,
       times_guessed INTEGER NOT NULL DEFAULT 0,
+      reported INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
     CREATE UNIQUE INDEX IF NOT EXISTS words_normalized_idx ON words (normalized);
@@ -49,6 +58,10 @@ export function ensureSchema(): void {
       created_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
     CREATE UNIQUE INDEX IF NOT EXISTS suggestions_normalized_idx ON suggestions (normalized);
-
   `);
+  // Databases created before `words.reported` existed (a volume, a dev file).
+  const cols = sqlite.prepare('PRAGMA table_info(words)').all() as { name: string }[];
+  if (!cols.some((c) => c.name === 'reported')) {
+    sqlite.exec('ALTER TABLE words ADD COLUMN reported INTEGER NOT NULL DEFAULT 0');
+  }
 }
