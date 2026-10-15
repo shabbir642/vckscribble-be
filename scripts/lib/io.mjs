@@ -19,6 +19,9 @@ class BrowserLikeWebSocket extends NodeWebSocket {
 }
 
 export function io(url, opts = {}) {
+  // Testing a server with a self-signed certificate (NODE_TLS_REJECT_UNAUTHORIZED=0):
+  // ws does not read that variable, so say it explicitly.
+  if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0') opts = { ...opts, rejectUnauthorized: false };
   const wantsWs = !opts.transports || opts.transports.includes('websocket');
   return baseIo(url, wantsWs ? { ...opts, transports: [BrowserLikeWebSocket] } : opts);
 }

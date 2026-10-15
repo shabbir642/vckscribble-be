@@ -11,8 +11,11 @@ import { CONTRACT_VERSION } from './contract/index.js';
 import { ensureSchema, sqlite, stmt } from './db/index.js';
 import { seedWords } from './db/seed.js';
 import { clientLog, sweepClientLog } from './http/clientLog.js';
+import { certFiles, waitForCerts, watchRenewal, type TlsConfig } from './http/tls.js';
 import {
+  clientIp,
   corsHeaders,
+  normalizeIp,
   parseJson,
   readBody,
   readRequest,
@@ -34,6 +37,18 @@ const PORT = Number(process.env.PORT ?? 3001);
  * network in between, for every frame of every game.
  */
 const SOCKET_PATH = process.env.SOCKET_PATH?.trim() || null;
+/**
+ * With TLS_CERT_DIR and TLS_DOMAIN set, this process serves HTTPS itself and
+ * players' browsers connect straight to DIRECT_PORT, skipping Caddy for game
+ * traffic. The Unix socket stays, for players whose network only allows 443:
+ * Caddy proxies them over it (TLS too, as both share one server).
+ */
+const TLS: TlsConfig | null = (() => {
+  const dir = process.env.TLS_CERT_DIR?.trim();
+  const domains = [process.env.TLS_DOMAIN?.trim()].filter((d): d is string => Boolean(d));
+  return dir && domains.length ? { dir, domains } : null;
+})();
+const DIRECT_PORT = Number(process.env.DIRECT_PORT ?? 8443);
 /** Set to 1 only when a reverse proxy (Caddy in deploy/) is the sole ingress. */
 const TRUST_PROXY = process.env.TRUST_PROXY === '1';
 /**
@@ -56,7 +71,8 @@ console.log(
 // Loaded as CommonJS: the package's ESM wrapper (v20.71.0) imports a file
 // it does not ship.
 const uWS = createRequire(import.meta.url)('uWebSockets.js') as typeof UWS;
-const app = uWS.App();
+if (TLS) await waitForCerts(TLS);
+const app = TLS ? uWS.SSLApp(certFiles(TLS.dir, TLS.domains[0]!)) : uWS.App();
 
 /**
  * Event-loop delay is the number that matters for a single-threaded relay:
@@ -77,6 +93,8 @@ function health(): Reply {
     enabledWords: c,
     rooms: store.size,
     sockets: io.engine.clientsCount,
+    // Players connected straight to this process, not through Caddy.
+    direct: directSockets,
     heapMb: Math.round(process.memoryUsage().heapUsed / 1048576),
     loopLagMs: {
       p50: lagMs(loopDelay.percentile(50)),
@@ -150,21 +168,26 @@ io.attachApp(app);
  * trusted with TRUST_PROXY=1 — exposed directly, a client could forge it and
  * dodge the per-IP limits.
  */
-function clientIp(headers: Record<string, string | string[] | undefined>, fallback: string) {
-  if (!TRUST_PROXY) return fallback;
-  const xff = headers['x-forwarded-for'];
-  const last = (Array.isArray(xff) ? xff.join(',') : xff)?.split(',').pop()?.trim();
-  return last || fallback;
-}
-
+let directSockets = 0;
 io.use((socket, next) => {
-  const ip = clientIp(socket.handshake.headers, socket.handshake.address);
+  const xff = socket.handshake.headers['x-forwarded-for'];
+  const ip = clientIp(
+    socket.handshake.address,
+    Array.isArray(xff) ? xff.join(',') : xff,
+    TRUST_PROXY,
+  );
   if (!openConnection(ip)) {
     next(new Error('Too many connections from your network'));
     return;
   }
   (socket.data as { ip?: string }).ip = ip;
-  socket.once('disconnect', () => closeConnection(ip));
+  // A TCP peer is a player on the direct port; the Unix socket is Caddy.
+  const direct = Boolean(normalizeIp(socket.handshake.address));
+  if (direct) directSockets++;
+  socket.once('disconnect', () => {
+    closeConnection(ip);
+    if (direct) directSockets--;
+  });
   next();
 });
 
@@ -226,7 +249,7 @@ const sweeper = setInterval(() => {
 sweeper.unref();
 
 
-let listenSocket: UWS.us_listen_socket | null = null;
+const listenSockets: UWS.us_listen_socket[] = [];
 const onListen = (where: string) => (sock: UWS.us_listen_socket | false) => {
   if (!sock) {
     // A port collision is otherwise easy to miss: an old server keeps
@@ -234,9 +257,9 @@ const onListen = (where: string) => (sock: UWS.us_listen_socket | false) => {
     console.error(`[http] could not listen on ${where} — is another server still running? Stop it first.`);
     process.exit(1);
   }
-  listenSocket = sock;
+  listenSockets.push(sock);
   // The proxy in the other container connects as a different user.
-  if (SOCKET_PATH) chmodSync(SOCKET_PATH, 0o666);
+  if (where === SOCKET_PATH) chmodSync(SOCKET_PATH, 0o666);
   console.log(`[http] listening on ${where} — client origin ${CLIENT_ORIGIN.join(', ')}`);
   if (!process.env.WORDS_API_TOKEN) {
     console.log('[http] POST /api/words disabled (WORDS_API_TOKEN unset)');
@@ -246,9 +269,9 @@ if (SOCKET_PATH) {
   // A socket file left by the previous run would make the listen fail.
   rmSync(SOCKET_PATH, { force: true });
   app.listen_unix(onListen(SOCKET_PATH), SOCKET_PATH);
-} else {
-  app.listen(PORT, onListen(`:${PORT}`));
 }
+if (TLS) app.listen(DIRECT_PORT, onListen(`:${DIRECT_PORT} (HTTPS, direct)`));
+else if (!SOCKET_PATH) app.listen(PORT, onListen(`:${PORT}`));
 
 /**
  * SQLite in WAL mode needs a clean close, or the -wal file is left for the next
@@ -266,7 +289,7 @@ function shutdown(signal: string): void {
   clearInterval(ticker);
   clearInterval(sweeper);
   io.close();
-  if (listenSocket) uWS.us_listen_socket_close(listenSocket);
+  for (const sock of listenSockets) uWS.us_listen_socket_close(sock);
   try {
     sqlite.close();
   } catch (e) {
@@ -276,4 +299,6 @@ function shutdown(signal: string): void {
   process.exit(0);
 }
 process.on('SIGTERM', () => shutdown('SIGTERM'));
+// Exits like a deploy would; Docker's restart policy brings it straight back.
+if (TLS) watchRenewal(TLS, () => io.engine.clientsCount === 0, (reason) => shutdown(reason));
 process.on('SIGINT', () => shutdown('SIGINT'));

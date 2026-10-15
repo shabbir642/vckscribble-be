@@ -55,7 +55,9 @@ await drawingState;
 console.log(`  (word: "${solution}")`);
 
 // wrong guess is public
-const publicWrong = next(g2, 'chat:message');
+// Other players' connections deliver independently: a system message sent
+// earlier can still be in flight, so wait for this one specifically.
+const publicWrong = until(g2, 'chat:message', (m) => m.channel === 'guess');
 g1.emit('chat:guess', { text: 'definitely not it' });
 const wrongMsg = await publicWrong;
 check('wrong guess is broadcast', wrongMsg.text === 'definitely not it' && wrongMsg.channel === 'guess');
@@ -84,7 +86,8 @@ const r2 = next(g2, 'draw:reaction');
 g1.emit('draw:react', { reaction: 'down' });
 const switched = await r2;
 check('switching moves the vote, not adds one', switched.likes === 0 && switched.dislikes === 1, JSON.stringify(switched));
-const r3 = next(g1, 'draw:reaction');
+// g1 also receives its own earlier vote's broadcast; wait for g2's.
+const r3 = until(g1, 'draw:reaction', (r) => r.reaction === 'up');
 g2.emit('draw:react', { reaction: 'up' });
 const second = await r3;
 check('each guesser counts once', second.likes === 1 && second.dislikes === 1, JSON.stringify(second));

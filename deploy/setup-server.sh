@@ -31,11 +31,12 @@ systemctl enable --now docker
 docker --version
 docker compose version
 
-step "Firewall: SSH, HTTP and HTTPS only"
+step "Firewall: SSH, HTTP, HTTPS and the direct game port only"
 ufw allow OpenSSH
 ufw allow 80/tcp
 ufw allow 443/tcp
 ufw allow 443/udp   # HTTP/3
+ufw allow 8443/tcp  # direct game connections (GAME_HOST:DIRECT_PORT)
 ufw --force enable
 ufw status
 

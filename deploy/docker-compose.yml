@@ -16,14 +16,22 @@ services:
       CLIENT_ORIGIN: ${CLIENT_ORIGIN}
       WORDS_API_TOKEN: ${WORDS_API_TOKEN:-}
       IP_LIMIT_SCALE: ${IP_LIMIT_SCALE:-1}
-      # Caddy reaches the backend through this Unix socket on a shared volume:
-      # no TCP and no Docker network on the hop every game frame takes.
+      # Players' browsers connect straight to the backend on DIRECT_PORT, which
+      # serves HTTPS itself with Caddy's certificate (copied in by
+      # sync-certs.sh): game frames skip Caddy entirely.
+      TLS_CERT_DIR: /certs
+      TLS_DOMAIN: ${GAME_HOST:?set GAME_HOST in deploy/.env (see .env.example)}
+      DIRECT_PORT: ${DIRECT_PORT:-8443}
+      # Players whose network allows only port 443 come through Caddy instead,
+      # over this Unix socket on a shared volume.
       SOCKET_PATH: /run/vmock/backend.sock
     volumes:
       - game-data:/data
       - sockets:/run/vmock
-    # No network at all: the socket is the only way in, and it needs no way out.
-    network_mode: none
+      - ${CERT_DIR:-/opt/vmock-skribble/certs}:/certs:ro
+    # The host's network, so DIRECT_PORT is a real port on the server with no
+    # Docker forwarding in between. It listens on nothing else.
+    network_mode: host
     # One socket per player; the default 1024 descriptors caps you well
     # below "hundreds of concurrent users" once proxy connections count too.
     ulimits:
@@ -31,10 +39,16 @@ services:
     stop_grace_period: 10s
 
   web:
-    build: ../../vckscribble-fe
+    build:
+      context: ../../vckscribble-fe
+      args:
+        VITE_DIRECT_SOCKET_HOST: ${GAME_HOST}
+        VITE_DIRECT_SOCKET_PORT: ${DIRECT_PORT:-8443}
     restart: unless-stopped
+    # Started, not healthy: on a new server the backend waits for the
+    # certificate that Caddy has yet to obtain.
     depends_on:
-      backend: { condition: service_healthy }
+      backend: { condition: service_started }
     # The host's network directly, not Docker's bridge: players' traffic skips
     # Docker's port forwarding (NAT and connection tracking). Caddy binds 80
     # and 443 (and 443/udp for HTTP/3) itself; the host firewall (ufw) now
@@ -42,6 +56,7 @@ services:
     network_mode: host
     environment:
       DOMAIN: ${DOMAIN}
+      GAME_HOST: ${GAME_HOST}
     ulimits:
       nofile: { soft: 65535, hard: 65535 }
     volumes:

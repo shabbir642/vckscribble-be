@@ -2,12 +2,20 @@
 # DOMAIN=:80 serves plain HTTP on the server's IP, e.g. before DNS is ready.
 {$DOMAIN}
 
-# Backend: REST and Socket.IO, over the Unix socket the backend listens on
-# (a volume shared by both containers). Caddy proxies WebSocket upgrades as-is
-# and appends the client address to X-Forwarded-For.
+# Backend: REST, and Socket.IO for players whose network blocks the direct
+# game port (everyone else connects to the backend itself, on GAME_HOST:8443).
+# Over the Unix socket the backend listens on (a volume shared by both
+# containers); the backend speaks HTTPS there too, as one server serves both,
+# so the connection is TLS checked against GAME_HOST's own certificate.
+# WebSocket upgrades pass through as-is; X-Forwarded-For gets the client.
 @backend path /api/* /socket.io/*
 handle @backend {
-	reverse_proxy unix//run/vmock/backend.sock
+	reverse_proxy unix//run/vmock/backend.sock {
+		transport http {
+			tls
+			tls_server_name {$GAME_HOST}
+		}
+	}
 }
 
 # Frontend: the static bundle. Hashed assets cache forever; the HTML never

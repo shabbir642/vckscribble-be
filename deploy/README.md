@@ -77,6 +77,8 @@ For vmock.fun the `.env` is:
 ```bash
 DOMAIN=vmock.fun, www.vmock.fun
 CLIENT_ORIGIN=https://vmock.fun,https://www.vmock.fun
+GAME_HOST=vmock.fun
+DIRECT_PORT=8443
 WORDS_API_TOKEN=<output of: openssl rand -hex 24>
 IP_LIMIT_SCALE=1
 ```
@@ -105,6 +107,25 @@ chmod +x /opt/vmock-skribble/vckscribble-be/deploy/backup.sh
 ```
 
 Backups land in `/data/backups` on the volume; the last 14 are kept.
+
+## 6b. Certificates for direct game connections
+
+Players' browsers connect straight to the game server on
+`GAME_HOST:DIRECT_PORT` (vmock.fun:8443), so game traffic skips Caddy. The
+game server uses Caddy's certificate, copied over by `sync-certs.sh` (Caddy
+keeps its files root-only). On a new server the game server waits for that
+first copy, so install it before the first start:
+
+```bash
+(crontab -l 2>/dev/null; echo "* * * * * /opt/vmock-skribble/vckscribble-be/deploy/sync-certs.sh >> /var/log/vmock-certs.log 2>&1") | crontab -
+```
+
+When Caddy renews the certificate (about every 60 days), the copy follows
+within a minute and the game server restarts itself to load it as soon as
+nobody is connected (within 7 days regardless; rooms are saved and restored,
+as on a deploy). Networks that block port 8443 fall back to port 443 through
+Caddy automatically; `direct` in `/api/health` counts the players connected
+the fast way.
 
 ## 7. Watchdog
 
@@ -170,4 +191,6 @@ together — the frontend and backend share a protocol version.
 | Page loads, but stuck on "Connecting…" | `docker compose logs backend`; `CLIENT_ORIGIN` must match the address bar exactly |
 | `docker compose up` fails building | `free -h` (is the swap on?) and re-run; the error is in the build output |
 | `/api` or the game is 502 but the home page loads | Caddy cannot reach the backend's Unix socket: `docker compose ps` (backend healthy?), `docker compose logs backend` |
+| Backend log says "waiting for a certificate" | `sync-certs.sh` has not copied one yet: run it by hand, check `/var/log/vmock-certs.log` and that `GAME_HOST` is one of the `DOMAIN` names |
+| `direct` in `/api/health` stays 0 while people play | Port 8443 closed: `ufw status` must allow `8443/tcp`; everyone is falling back to 443 |
 | Everything was fine, now it's down | `docker compose ps`; `docker compose up -d` restarts anything stopped |

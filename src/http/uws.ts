@@ -43,14 +43,61 @@ export function readRequest(res: HttpResponse, req: HttpRequest, trustProxy: boo
   req.forEach((k, v) => {
     headers[k] = v;
   });
-  const xff = headers['x-forwarded-for']?.split(',').pop()?.trim();
-  const direct = Buffer.from(res.getRemoteAddressAsText()).toString() || 'unknown';
   return {
     method: req.getCaseSensitiveMethod().toUpperCase(),
     url: req.getUrl(),
     headers,
-    ip: trustProxy && xff ? xff : direct,
+    ip: clientIp(Buffer.from(res.getRemoteAddressAsText()).toString(), headers['x-forwarded-for'], trustProxy),
   };
+}
+
+/**
+ * Who is on the other end. A TCP connection — a player connecting directly —
+ * has a real address that cannot be forged, so it wins. The Unix socket has
+ * none: that is Caddy, and the client is the last X-Forwarded-For hop it
+ * appended, trusted only with `trustProxy` (a direct client could otherwise
+ * send any X-Forwarded-For it liked to dodge per-IP limits).
+ */
+export function clientIp(remote: string, xff: string | undefined, trustProxy: boolean): string {
+  const direct = normalizeIp(remote);
+  if (direct) return direct;
+  const forwarded = trustProxy ? xff?.split(',').pop()?.trim() : undefined;
+  return forwarded || 'unknown';
+}
+
+/**
+ * uWS reports addresses as eight full hex groups, IPv4 included
+ * (0000:…:ffff:7f00:0001). Caddy writes the usual forms (127.0.0.1, ::1).
+ * Rate limits key on the address, so a player must look the same either way.
+ */
+export function normalizeIp(raw: string): string {
+  if (!raw || raw.includes('.')) return raw;
+  const groups = raw.split(':');
+  if (groups.length !== 8) return raw;
+  const n = groups.map((g) => parseInt(g, 16));
+  if (n.some((x) => Number.isNaN(x))) return raw;
+  if (n.slice(0, 5).every((x) => x === 0) && n[5] === 0xffff) {
+    return `${n[6]! >> 8}.${n[6]! & 255}.${n[7]! >> 8}.${n[7]! & 255}`;
+  }
+  // RFC 5952: the longest run of two or more zero groups becomes "::".
+  let best = -1;
+  let bestLen = 0;
+  for (let i = 0; i < 8; ) {
+    if (n[i] !== 0) {
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j < 8 && n[j] === 0) j++;
+    if (j - i >= 2 && j - i > bestLen) {
+      best = i;
+      bestLen = j - i;
+    }
+    i = j;
+  }
+  const hex = n.map((x) => x.toString(16));
+  if (best < 0) return hex.join(':');
+  return `${hex.slice(0, best).join(':')}::${hex.slice(best + bestLen).join(':')}`;
 }
 
 /**
