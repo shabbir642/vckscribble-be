@@ -35,8 +35,13 @@ const visitor = await connect();
 const peek = await emit(visitor, 'room:peek', { roomCode: code.toLowerCase() });
 check('peek describes the room', peek.ok && peek.roomCode === code && peek.hostName === 'Ann' && peek.players === 1 && peek.phase === 'lobby',
   JSON.stringify(peek));
+// A dead code this process owns: with several processes, one owned by another
+// is WRONG_SHARD here (the browser would have gone to its owner first).
+const shards = (await (await fetch(`${URL}/api/shards`)).json()).shards ?? 1;
+const fnv = (c) => { let h = 0x811c9dc5; for (const ch of c) { h ^= ch.charCodeAt(0); h = Math.imul(h, 0x01000193) >>> 0; } return h % shards; };
+const deadCode = ['QQQQ', 'QQQR', 'QQQT', 'QQQU', 'QQQV', 'QQQW', 'QQQX', 'QQQY', 'QQQ3', 'QQQ4', 'QQQ6', 'QQQ7'].find((c) => shards <= 1 || fnv(c) === 0);
 check('peek of a dead code -> ROOM_NOT_FOUND',
-  (await emit(visitor, 'room:peek', { roomCode: 'QQQQ' })).code === 'ROOM_NOT_FOUND');
+  (await emit(visitor, 'room:peek', { roomCode: deadCode })).code === 'ROOM_NOT_FOUND');
 check('peek does not seat you', (await emit(visitor, 'player:update', { name: 'X' })).code === 'ROOM_NOT_FOUND');
 
 // --- rename in lobby ----------------------------------------------------------

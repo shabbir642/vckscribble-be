@@ -127,6 +127,22 @@ as on a deploy). Networks that block port 8443 fall back to port 443 through
 Caddy automatically; `direct` in `/api/health` counts the players connected
 the fast way.
 
+## 6c. One game process per CPU core
+
+Node runs JavaScript on one core per process, so the backend runs one
+game-server process per core (`SHARDS=auto` in `docker-compose.yml`; set a
+number in `.env` to override). Rooms never interact, so each process owns
+the rooms whose code hashes to it: browsers connect straight to process N on
+`DIRECT_PORT + N` (8443, 8444, …), or through Caddy at `/s/N/socket.io`. A
+small supervisor prepares the database, starts the processes, and restarts
+one that crashes; on a deploy each saves its own rooms.
+
+On a one-core server this is a single process, as before. Upgrading the
+server to more cores is the whole scaling step: the next start runs one
+process per core, and rooms saved by the old processes come back on their
+new owners. The firewall already opens 8443-8458 (up to 16 cores).
+`/api/health` lists every process's load under `cluster`.
+
 ## 7. Watchdog
 
 Restarts the stack if it is running but stuck (Docker already restarts a
@@ -192,5 +208,5 @@ together — the frontend and backend share a protocol version.
 | `docker compose up` fails building | `free -h` (is the swap on?) and re-run; the error is in the build output |
 | `/api` or the game is 502 but the home page loads | Caddy cannot reach the backend's Unix socket: `docker compose ps` (backend healthy?), `docker compose logs backend` |
 | Backend log says "waiting for a certificate" | `sync-certs.sh` has not copied one yet: run it by hand, check `/var/log/vmock-certs.log` and that `GAME_HOST` is one of the `DOMAIN` names |
-| `direct` in `/api/health` stays 0 while people play | Port 8443 closed: `ufw status` must allow `8443/tcp`; everyone is falling back to 443 |
+| `direct` in `/api/health` stays 0 while people play | Direct ports closed: `ufw status` must allow `8443:8458/tcp`; everyone is falling back to 443 |
 | Everything was fine, now it's down | `docker compose ps`; `docker compose up -d` restarts anything stopped |

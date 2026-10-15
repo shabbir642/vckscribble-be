@@ -10,6 +10,7 @@ import {
   type RoundState,
 } from '../contract/index.js';
 import { playerId as newPlayerId, roomCode, token as newToken } from './codes.js';
+import { SHARD, SHARDS } from '../shard.js';
 import type { PlayerRecord, Room } from './types.js';
 
 export class StoreError extends Error {
@@ -87,7 +88,7 @@ export class RoomStore {
     socketId: string,
     deviceId: string | null = null,
   ): { room: Room; player: PlayerRecord } {
-    const code = roomCode((c) => this.rooms.has(c));
+    const code = roomCode((c) => this.rooms.has(c), SHARD, SHARDS);
     const room: Room = {
       code,
       hostId: '',

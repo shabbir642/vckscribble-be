@@ -1,4 +1,6 @@
+import { shardOf } from '../contract/index.js';
 import { sqlite, stmt } from '../db/index.js';
+import { SHARD, SHARDS } from '../shard.js';
 import type { Room } from './types.js';
 
 /**
@@ -41,13 +43,15 @@ export function ensureSnapshotTable(): void {
   `);
 }
 
-/** Writes every room with anyone in it. Returns how many were saved. */
+/**
+ * Writes every room with anyone in it. Returns how many were saved. Each
+ * process writes only its own rooms; the others' snapshots are theirs.
+ */
 export function saveRooms(rooms: Room[]): number {
   const now = Date.now();
   const insert = stmt('INSERT OR REPLACE INTO room_snapshots (code, data, saved_at) VALUES (?, ?, ?)');
   let saved = 0;
   sqlite.transaction(() => {
-    stmt('DELETE FROM room_snapshots').run();
     for (const room of rooms) {
       if (room.players.size === 0) continue;
       insert.run(room.code, JSON.stringify(room, replacer), now);
@@ -58,16 +62,25 @@ export function saveRooms(rooms: Room[]): number {
 }
 
 /**
- * Reads the snapshots back and clears the table, so a room is restored once.
- * Everyone comes back disconnected: their seats wait for them to resume.
+ * Reads back the snapshots of the rooms this process owns — by the current
+ * process count, so after a server with more cores comes up each room lands
+ * on its new owner — and deletes them, so a room is restored once. Everyone
+ * comes back disconnected: their seats wait for them to resume.
  */
 export function loadRooms(now = Date.now()): { room: Room; downtimeMs: number }[] {
-  const rows = stmt('SELECT code, data, saved_at FROM room_snapshots').all() as {
-    code: string;
-    data: string;
-    saved_at: number;
-  }[];
-  stmt('DELETE FROM room_snapshots').run();
+  const rows = (
+    stmt('SELECT code, data, saved_at FROM room_snapshots').all() as {
+      code: string;
+      data: string;
+      saved_at: number;
+    }[]
+  ).filter((r) => shardOf(r.code, SHARDS) === SHARD);
+  const remove = stmt('DELETE FROM room_snapshots WHERE code = ?');
+  sqlite.transaction(() => {
+    for (const r of rows) remove.run(r.code);
+    // Anything this old is stale whoever owns it.
+    stmt('DELETE FROM room_snapshots WHERE saved_at < ?').run(now - MAX_AGE_MS);
+  })();
 
   const out: { room: Room; downtimeMs: number }[] = [];
   for (const row of rows) {

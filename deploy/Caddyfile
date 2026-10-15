@@ -2,15 +2,29 @@
 # DOMAIN=:80 serves plain HTTP on the server's IP, e.g. before DNS is ready.
 {$DOMAIN}
 
-# Backend: REST, and Socket.IO for players whose network blocks the direct
-# game port (everyone else connects to the backend itself, on GAME_HOST:8443).
-# Over the Unix socket the backend listens on (a volume shared by both
-# containers); the backend speaks HTTPS there too, as one server serves both,
-# so the connection is TLS checked against GAME_HOST's own certificate.
-# WebSocket upgrades pass through as-is; X-Forwarded-For gets the client.
+# Backend, for players whose network blocks the direct game port (everyone
+# else connects to the game server itself, on GAME_HOST:8443 + N). Over the
+# Unix sockets the game-server processes listen on (a volume shared by both
+# containers); they speak HTTPS there too, as each serves both, so the
+# connection is TLS checked against GAME_HOST's own certificate. WebSocket
+# upgrades pass through as-is; X-Forwarded-For gets the client.
+#
+# Process N (one per CPU core, each owning a share of the rooms) is reached at
+# /s/N/socket.io; /api and a bare /socket.io go to process 0.
+@shard path_regexp shard ^/s/(\d+)/socket\.io/
+handle @shard {
+	uri path_regexp ^/s/\d+ ""
+	reverse_proxy unix//run/vmock/backend-{re.shard.1}.sock {
+		transport http {
+			tls
+			tls_server_name {$GAME_HOST}
+		}
+	}
+}
+
 @backend path /api/* /socket.io/*
 handle @backend {
-	reverse_proxy unix//run/vmock/backend.sock {
+	reverse_proxy unix//run/vmock/backend-0.sock {
 		transport http {
 			tls
 			tls_server_name {$GAME_HOST}

@@ -8,7 +8,7 @@
  * Keep this file dependency-free so both repos can consume it as-is.
  */
 
-export const CONTRACT_VERSION = 13;
+export const CONTRACT_VERSION = 14;
 
 /* ---------------------------------------------------------------- domain */
 
@@ -181,6 +181,23 @@ export interface RoomPreview {
   players: number;
   maxPlayers: number;
   phase: RoundPhase;
+}
+
+/**
+ * Which game-server process owns a room. With one process per CPU core, each
+ * owns the rooms whose code hashes to it, so the browser can connect straight
+ * to the right one from the code alone. FNV-1a: tiny, and the same in both
+ * repos. The server stays the authority (WRONG_SHARD if asked about a room it
+ * does not own, e.g. after the process count changed).
+ */
+export function shardOf(roomCode: string, shards: number): number {
+  if (shards <= 1) return 0;
+  let h = 0x811c9dc5;
+  for (const ch of roomCode.toUpperCase()) {
+    h ^= ch.charCodeAt(0);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h % shards;
 }
 
 /** Canonical invite link for a room: `<origin>/?room=CODE`. */
@@ -389,6 +406,7 @@ export type ErrorCode =
   | 'RATE_LIMITED'
   | 'SEAT_IN_USE'
   | 'KICKED'
+  | 'WRONG_SHARD'
   | 'INVALID'
   | 'INTERNAL';
 

@@ -36,7 +36,7 @@ ufw allow OpenSSH
 ufw allow 80/tcp
 ufw allow 443/tcp
 ufw allow 443/udp   # HTTP/3
-ufw allow 8443/tcp  # direct game connections (GAME_HOST:DIRECT_PORT)
+ufw allow 8443:8458/tcp  # direct game connections: one port per game process (up to 16 cores)
 ufw --force enable
 ufw status
 

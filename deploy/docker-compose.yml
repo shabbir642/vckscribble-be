@@ -23,8 +23,11 @@ services:
       TLS_DOMAIN: ${GAME_HOST:?set GAME_HOST in deploy/.env (see .env.example)}
       DIRECT_PORT: ${DIRECT_PORT:-8443}
       # Players whose network allows only port 443 come through Caddy instead,
-      # over this Unix socket on a shared volume.
-      SOCKET_PATH: /run/vmock/backend.sock
+      # over these Unix sockets on a shared volume, one per process.
+      SOCKET_PATH: /run/vmock/backend-{shard}.sock
+      # One game-server process per CPU core, each owning a share of the rooms
+      # (process N on DIRECT_PORT + N). "auto" follows the server's core count.
+      SHARDS: ${SHARDS:-auto}
     volumes:
       - game-data:/data
       - sockets:/run/vmock

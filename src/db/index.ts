@@ -18,6 +18,12 @@ sqlite.pragma('journal_mode = WAL');
  */
 sqlite.pragma('synchronous = NORMAL');
 sqlite.pragma('foreign_keys = ON');
+/**
+ * One process per CPU core shares this file. Writes are rare and tiny (word
+ * stats, reports), so a writer that finds the lock taken waits a moment
+ * instead of failing with SQLITE_BUSY.
+ */
+sqlite.pragma('busy_timeout = 2000');
 
 export const db = drizzle(sqlite, { schema });
 

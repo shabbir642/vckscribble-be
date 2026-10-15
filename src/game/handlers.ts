@@ -1,6 +1,7 @@
 import type { Server, Socket } from 'socket.io';
 import { z } from 'zod';
 import {
+  shardOf,
   DRAW_TIMES,
   MAX_POINTS_PER_STROKE,
   WORD_PACKS,
@@ -25,6 +26,7 @@ import { StoreError, store } from './store.js';
 import type { PlayerRecord, Room } from './types.js';
 import { parseCustomWords, reportWord } from './words.js';
 import { recordNetReport } from './netStats.js';
+import { SHARD, SHARDS } from '../shard.js';
 
 type IO = Server<ClientToServerEvents, ServerToClientEvents>;
 type Sock = Socket<ClientToServerEvents, ServerToClientEvents>;
@@ -32,6 +34,19 @@ type Sock = Socket<ClientToServerEvents, ServerToClientEvents>;
 const Name = z.string().trim().min(1, 'Name required').max(20);
 const Avatar = z.number().int().min(0).max(11);
 const Code = z.string().trim().toUpperCase().min(4).max(6);
+
+/**
+ * A room code this process owns, or WRONG_SHARD: another process has (or would
+ * have) that room. "Not found" would be a lie the browser could not recover
+ * from; this tells it to reconnect to the right process.
+ */
+function ownedCode(raw: unknown): string {
+  const code = Code.parse(raw);
+  if (shardOf(code, SHARDS) !== SHARD) {
+    throw new StoreError('WRONG_SHARD', 'That room is on another game server — reconnecting to it');
+  }
+  return code;
+}
 /** Optional and untrusted: only ever compared for equality, never shown. */
 const DeviceId = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/).optional().catch(undefined);
 
@@ -201,7 +216,7 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
         ack(fail('RATE_LIMITED', 'Too many attempts — wait a moment'));
         return;
       }
-      const code = Code.parse(payload?.roomCode);
+      const code = ownedCode(payload?.roomCode);
       const name = Name.parse(payload?.name);
       const avatar = Avatar.parse(payload?.avatar);
       const deviceId = DeviceId.parse(payload?.deviceId) ?? null;
@@ -227,7 +242,7 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
         ack(fail('RATE_LIMITED', 'Too many attempts — wait a moment'));
         return;
       }
-      const code = Code.parse(payload?.roomCode);
+      const code = ownedCode(payload?.roomCode);
       ack({ ok: true, ...store.preview(code) });
     } catch (e) {
       ack(toFailure(e));
@@ -292,7 +307,7 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
         ack(fail('RATE_LIMITED', 'Too many attempts — wait a moment'));
         return;
       }
-      const code = Code.parse(payload?.roomCode);
+      const code = ownedCode(payload?.roomCode);
       const token = z.string().min(8).max(64).parse(payload?.token);
       const takeover = z.boolean().optional().parse(payload?.takeover) ?? true;
       const current = store.seatOf(socket.id);

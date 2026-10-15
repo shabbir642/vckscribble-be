@@ -27,9 +27,9 @@ USER node
 ENV DATABASE_URL=/data/game.db
 ENV PORT=3001
 EXPOSE 3001
-# Over the Unix socket when SOCKET_PATH is set (deploy/), else the TCP port;
+# Process 0, over its Unix socket when SOCKET_PATH is set (deploy/), else the TCP port;
 # HTTPS when the server has a certificate (it is this server's own socket,
 # so the certificate is not checked).
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s \
-  CMD node -e "const e=process.env,p=e.SOCKET_PATH;require(e.TLS_DOMAIN&&e.TLS_CERT_DIR?'https':'http').get({path:'/api/health',rejectUnauthorized:false,...(p?{socketPath:p}:{port:e.PORT})},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+  CMD node -e "const e=process.env,p=e.SOCKET_PATH&&e.SOCKET_PATH.replace('{shard}','0');require(e.TLS_DOMAIN&&e.TLS_CERT_DIR?'https':'http').get({path:'/api/health',rejectUnauthorized:false,...(p?{socketPath:p}:{port:e.PORT})},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
 CMD ["node", "dist/index.js"]
