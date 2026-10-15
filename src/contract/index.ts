@@ -8,7 +8,7 @@
  * Keep this file dependency-free so both repos can consume it as-is.
  */
 
-export const CONTRACT_VERSION = 12;
+export const CONTRACT_VERSION = 13;
 
 /* ---------------------------------------------------------------- domain */
 
@@ -290,6 +290,28 @@ export interface ClientToServerEvents {
   /** A guesser rates the drawing in progress. One vote per turn; may switch. */
   'draw:react': (p: { reaction: Reaction }) => void;
   'word:report': (p: { reason: string }, ack: Ack) => void;
+
+  /** Round-trip probe: the server acks at once; the client times it. */
+  'net:ping': (p: Record<string, never>, ack: () => void) => void;
+  /**
+   * What this browser's connection has been like over the last minute, so the
+   * server can tell whether real players see lag (it cannot measure their side).
+   */
+  'net:report': (p: NetReport) => void;
+}
+
+export interface NetReport {
+  /** Round trips measured this period, in ms, summarized. */
+  rttP50: number;
+  rttP95: number;
+  rttMax: number;
+  samples: number;
+  /** Pings that got no answer within 5 s. */
+  lost: number;
+  /** Times the connection dropped and came back this period. */
+  reconnects: number;
+  /** Connected straight to the game server rather than through the proxy. */
+  direct: boolean;
 }
 
 /* ----------------------------------------------- server -> client events */

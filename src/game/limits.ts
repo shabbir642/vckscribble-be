@@ -34,6 +34,9 @@ const SOCKET_LIMITS: Record<string, Limit> = {
   'room:settings': { perSecond: 5, burst: 10 },
   'player:update': { perSecond: 1, burst: 5 },
   'player:kick': { perSecond: 1, burst: 5 },
+  // Clients ping every 10 s and report once a minute.
+  'net:ping': { perSecond: 1, burst: 3 },
+  'net:report': { perSecond: 0.1, burst: 3 },
   'room:resume': { perSecond: 2, burst: 5 },
   'room:create': { perSecond: 1, burst: 3 },
   'room:join': { perSecond: 2, burst: 5 },

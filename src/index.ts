@@ -26,6 +26,7 @@ import {
 import { wordsHandler } from './http/words.js';
 import { registerHandlers } from './game/handlers.js';
 import { closeConnection, openConnection, sweepLimits } from './game/limits.js';
+import { netSummary } from './game/netStats.js';
 import { ensureSnapshotTable, loadRooms, saveRooms } from './game/persist.js';
 import { RoundEngine } from './game/round.js';
 import { store } from './game/store.js';
@@ -96,6 +97,8 @@ function health(): Reply {
     // Players connected straight to this process, not through Caddy.
     direct: directSockets,
     heapMb: Math.round(process.memoryUsage().heapUsed / 1048576),
+    // Players' own view of their connections, last 15 minutes.
+    network: netSummary(),
     loopLagMs: {
       p50: lagMs(loopDelay.percentile(50)),
       p99: lagMs(loopDelay.percentile(99)),
@@ -231,6 +234,20 @@ const ticker = setInterval(() => {
   }
 }, 1000);
 ticker.unref();
+
+/**
+ * Every 5 minutes with players around, one line on what their connections are
+ * like — the log is where to look back at a session that "felt laggy".
+ */
+const netLogger = setInterval(() => {
+  const n = netSummary();
+  if (!n.reports) return;
+  console.log(
+    `[net] ${n.reports} reports/15min: rtt p50 ${n.rttP50}ms p95 ${n.rttP95}ms, ` +
+      `${n.lostPings} lost pings, ${n.reconnects} reconnects, ${Math.round(n.directShare * 100)}% direct`,
+  );
+}, 5 * 60_000);
+netLogger.unref();
 
 /** Reaps abandoned lobby seats and dead rooms; see RoomStore.sweep. */
 const sweeper = setInterval(() => {

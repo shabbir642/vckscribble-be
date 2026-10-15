@@ -24,6 +24,7 @@ import type { RoundEngine } from './round.js';
 import { StoreError, store } from './store.js';
 import type { PlayerRecord, Room } from './types.js';
 import { parseCustomWords, reportWord } from './words.js';
+import { recordNetReport } from './netStats.js';
 
 type IO = Server<ClientToServerEvents, ServerToClientEvents>;
 type Sock = Socket<ClientToServerEvents, ServerToClientEvents>;
@@ -517,6 +518,17 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
     } catch (e) {
       toast(e);
     }
+  });
+
+  /** Answered at once: the client times the round trip. */
+  socket.on('net:ping', (_payload, ack) => {
+    if (!allow(socket.id, 'net:ping')) return;
+    if (typeof ack === 'function') ack();
+  });
+
+  socket.on('net:report', (payload) => {
+    if (!allow(socket.id, 'net:report')) return;
+    if (payload && typeof payload === 'object') recordNetReport(payload);
   });
 
   /**
