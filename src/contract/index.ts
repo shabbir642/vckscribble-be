@@ -334,7 +334,11 @@ export interface ServerToClientEvents {
 
   /** Drawer only. */
   'word:options': (p: { choices: WordChoice[]; allowCustom: boolean }) => void;
-  /** Drawer only — the solution they must draw. */
+  /**
+   * The solution, privately: to the drawer when the turn starts, and to each
+   * guesser the moment they get it (and again on reconnect), so solvers see
+   * the word instead of the blanks for the rest of the turn.
+   */
   'word:assigned': (p: { text: string }) => void;
 
   /**

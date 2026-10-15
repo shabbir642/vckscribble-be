@@ -528,6 +528,9 @@ export class RoundEngine {
     this.system(room, `${player.name} guessed it!`, 'correct');
     this.publish(room);
     this.sendPlayers(room);
+    // The solver sees the word instead of the blanks for the rest of the turn;
+    // only them — everyone else is still guessing.
+    if (room.active) this.socketOf(player)?.emit('word:assigned', { text: room.active.text });
 
     // Everyone but the drawer has it — no reason to run the clock down.
     const pending = [...room.players.values()].filter(
@@ -581,9 +584,15 @@ export class RoundEngine {
    * first thing a confused player does, so this path has to be whole.
    */
   resendTurnContext(room: Room, player: PlayerRecord): void {
-    if (room.round.drawerId !== player.id) return;
     const socket = this.socketOf(player);
     if (!socket) return;
+    // A guesser who already solved this turn gets the word back too.
+    if (room.round.drawerId !== player.id) {
+      if (room.round.phase === 'drawing' && room.active && room.round.guessedPlayerIds.includes(player.id)) {
+        socket.emit('word:assigned', { text: room.active.text });
+      }
+      return;
+    }
 
     if (room.round.phase === 'drawing' && room.active) {
       socket.emit('word:assigned', { text: room.active.text });

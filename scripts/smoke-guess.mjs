@@ -98,6 +98,8 @@ check('the drawer cannot rate their own drawing', (await ownToast).code === 'NOT
 // correct guess: system message, not the word itself
 const sys = next(g2, 'chat:message');
 const scored = next(g2, 'room:players');
+const solverWord = next(g1, 'word:assigned', 3000).catch(() => null);
+const othersWord = collect(g2, 'word:assigned', 1000);
 g1.emit('chat:guess', { text: solution.toUpperCase() });
 const sysMsg = await sys;
 check('correct guess announced without revealing word',
@@ -109,6 +111,8 @@ const dee = players.find(p => p.name === drawer.name);
 check('guesser scored', gus.score > 0, `score=${gus.score}`);
 check('drawer scored for the guess', dee.score > 0, `score=${dee.score}`);
 check('case-insensitive matching', gus.score > 0);
+check('the solver is shown the word', (await solverWord)?.text === solution, JSON.stringify(await solverWord));
+check('players still guessing are not', (await othersWord).length === 0);
 
 // leak prevention: solver chat must not reach the unsolved player
 const leaked = collect(g2, 'chat:message', 900);
