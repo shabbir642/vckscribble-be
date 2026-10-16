@@ -114,6 +114,8 @@ export class RoomStore {
       reactions: new Map(),
       customWords: [],
       usedCustom: new Set(),
+      customOffered: new Map(),
+      turnNo: 0,
       drawn: new Set(),
       hintPlan: [],
       finalScoreboard: false,
@@ -262,6 +264,8 @@ export class RoomStore {
     for (const p of room.players.values()) p.isHost = false;
     room.hostId = player?.id ?? '';
     if (player) player.isHost = true;
+    // Votes cast against them before they took over no longer count.
+    if (player) room.kickVotes.delete(player.id);
   }
 
   private cancelHandoff(code: string): void {
@@ -355,6 +359,8 @@ export class RoomStore {
     const target = room.players.get(targetId);
     if (!target) throw new StoreError('INVALID', 'That player is not in the room');
     if (target.id === actor.id) throw new StoreError('INVALID', "You can't kick yourself");
+    // It is their room. A host who walks away hands it on by themselves.
+    if (target.id === room.hostId) throw new StoreError('INVALID', "The host can't be kicked");
     const needed = kickVotesNeeded(this.present(room).length);
     if (room.hostId === actor.id) {
       return { target, kicked: true, by: 'host', votes: 0, needed };
@@ -386,7 +392,7 @@ export class RoomStore {
     const out: PlayerRecord[] = [];
     for (const targetId of room.kickVotes.keys()) {
       const target = room.players.get(targetId);
-      if (target?.connected && this.liveVotes(room, targetId).length >= needed) out.push(target);
+      if (target?.connected && targetId !== room.hostId && this.liveVotes(room, targetId).length >= needed) out.push(target);
     }
     return out;
   }
@@ -416,6 +422,7 @@ export class RoomStore {
   setCustomWords(room: Room, words: string[]): void {
     room.customWords = words;
     room.usedCustom = new Set();
+    room.customOffered = new Map();
     room.settings = { ...room.settings, customWordCount: words.length };
     room.lastActivity = Date.now();
   }

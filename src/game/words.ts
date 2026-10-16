@@ -164,6 +164,14 @@ export interface ChoiceOptions {
   /** The host's custom list, and which of its entries were drawn already. */
   custom: string[];
   usedCustom: Set<number>;
+  /** Normalized text of every word drawn this game, from any source. */
+  drawn: Set<string>;
+  /** Custom index -> the turn it was last offered on. */
+  customOffered: Map<number, number>;
+  /** This turn's number within the game, counting from 1. */
+  turn: number;
+  /** Turns left in the game, this one included. */
+  turnsLeft: number;
   customOnly: boolean;
 }
 
@@ -175,6 +183,53 @@ export const customId = (index: number) => -(index + 1);
 export const customIndex = (id: number) => -id - 1;
 
 /**
+ * A custom word offered on one of the last few turns sits out, so passing it
+ * over does not bring it straight back.
+ */
+const CUSTOM_COOLDOWN_TURNS = 2;
+/** Offers a host's word gets, on average, before the game should be over. */
+const CUSTOM_OFFERS_EACH = 2;
+
+/**
+ * How many of this turn's choices come from the host's list when it is mixed
+ * with the dictionary. The undrawn custom words are spread over the turns
+ * left: a short list in a long game turns up every few turns instead of in
+ * every offer and then over and over once it has all been used.
+ */
+function customSlots(o: ChoiceOptions, available: number): number {
+  if (o.customOnly) return o.count;
+  if (!available) return 0;
+  const undrawn = o.custom.filter((_, i) => !isDrawn(o, i)).length;
+  const rate = (undrawn * CUSTOM_OFFERS_EACH) / Math.max(1, o.turnsLeft);
+  // Always leave the drawer a dictionary word to fall back on.
+  const want = Math.min(rate, Math.max(1, o.count - 1), available);
+  return Math.floor(want) + (Math.random() < want % 1 ? 1 : 0);
+}
+
+const isDrawn = (o: ChoiceOptions, i: number) =>
+  o.usedCustom.has(i) || o.drawn.has(normalizeWord(o.custom[i]!));
+
+/**
+ * The custom words to offer, best first: never drawn before drawn, then the
+ * one offered longest ago (or never), ties broken at random. Mixed with the
+ * dictionary, words already drawn or just offered are left out entirely; a
+ * custom-only room has nothing else, so it reuses them, oldest first.
+ */
+function rankCustom(o: ChoiceOptions): number[] {
+  const lastOffered = (i: number) => o.customOffered.get(i) ?? 0;
+  const seen = new Set<string>();
+  const ranked = o.custom
+    .map((text, i) => ({ i, key: normalizeWord(text), drawn: isDrawn(o, i), at: lastOffered(i), r: Math.random() }))
+    // A list can hold the same word twice in different spellings.
+    .filter((w) => !seen.has(w.key) && (seen.add(w.key), true))
+    .sort((a, b) => Number(a.drawn) - Number(b.drawn) || a.at - b.at || a.r - b.r);
+  if (o.customOnly) return ranked.map((w) => w.i);
+  return ranked
+    .filter((w) => !w.drawn && (!w.at || o.turn - w.at > CUSTOM_COOLDOWN_TURNS))
+    .map((w) => w.i);
+}
+
+/**
  * The words a drawer chooses between. Drawn from the room's packs at its
  * difficulty, mixed with (or limited to) the host's custom list, and never
  * repeating within a game while there is anything fresh left. A room that
@@ -183,7 +238,6 @@ export const customIndex = (id: number) => -id - 1;
 export function pickChoices(o: ChoiceOptions): WordChoice[] {
   const chosen: WordChoice[] = [];
   const exclude = new Set(o.usedIds);
-  const takenCustom = new Set<number>();
   const packs = o.packs.length ? o.packs : (['everyday'] as WordPackId[]);
   const allowedTiers = TIER_ODDS[o.difficulty].map(([t]) => t);
 
@@ -197,31 +251,34 @@ export function pickChoices(o: ChoiceOptions): WordChoice[] {
       | undefined;
   };
 
-  const takeCustom = (): WordChoice | undefined => {
-    const pool = o.custom.map((_, i) => i).filter((i) => !takenCustom.has(i));
-    const fresh = pool.filter((i) => !o.usedCustom.has(i));
-    const from = fresh.length ? fresh : pool;
-    if (!from.length) return undefined;
-    const i = from[Math.floor(Math.random() * from.length)]!;
-    takenCustom.add(i);
-    return { id: customId(i), text: o.custom[i]!, drawability: 2 };
-  };
+  const customs = rankCustom(o);
+  for (const i of customs.slice(0, customSlots(o, customs.length))) {
+    chosen.push({ id: customId(i), text: o.custom[i]!, drawability: 2 });
+  }
+  if (o.customOnly) return chosen;
 
-  for (let n = 0; n < o.count; n++) {
-    const wantCustom = o.customOnly || (o.custom.length > 0 && Math.random() < 0.5);
-    if (wantCustom) {
-      const c = takeCustom();
-      if (c) { chosen.push(c); continue; }
-      if (o.customOnly) break;
-    }
+  const texts = new Set(chosen.map((c) => normalizeWord(c.text)));
+  for (let tries = 0; chosen.length < o.count && tries < o.count * 3; tries++) {
     const tier = rollTier(o.difficulty);
     const row =
       take([tier], true) ?? take(allowedTiers, true) ?? take([1, 2, 3], true) ?? take(allowedTiers, false);
     if (!row) break;
     exclude.add(row.id);
+    // The host may have typed a word the dictionary has too.
+    if (texts.has(normalizeWord(row.text))) continue;
+    texts.add(normalizeWord(row.text));
     chosen.push({ id: row.id, text: row.text, drawability: row.drawability as Drawability });
   }
-  return chosen;
+  // Customs first would give their place away.
+  return shuffle(chosen);
+}
+
+function shuffle<T>(items: T[]): T[] {
+  for (let i = items.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [items[i], items[j]] = [items[j]!, items[i]!];
+  }
+  return items;
 }
 
 export function wordById(id: number): WordChoice | null {

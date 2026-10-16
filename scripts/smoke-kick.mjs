@@ -121,14 +121,12 @@ console.log('a departure can decide a vote');
 console.log('kicking the host or the drawer');
 {
   const seats = await room(['Hana', 'Ann', 'Ben']);
-  const [host, ann, ben] = seats;
-  await emit(ann.sock, 'player:kick', { playerId: host.id });
-  const kicked = next(host.sock, 'room:kicked');
-  await emit(ben.sock, 'player:kick', { playerId: host.id });
-  await kicked;
-  await sleep(200);
-  const hostNow = ann.sock.players.find((p) => p.isHost);
-  check('host voted out hands the role on', hostNow && hostNow.id !== host.id, JSON.stringify(ann.sock.players));
+  const [host, ann] = seats;
+  const r = await emit(ann.sock, 'player:kick', { playerId: host.id });
+  check('the host cannot be voted out', !r.ok && r.code === 'INVALID', JSON.stringify(r));
+  await sleep(100);
+  const row = ann.sock.players.find((p) => p.id === host.id);
+  check('no vote is recorded against the host', row && row.kickVotes.length === 0, JSON.stringify(row));
   closeAll(seats);
 }
 {

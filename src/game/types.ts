@@ -69,6 +69,10 @@ export interface Room {
   customWords: string[];
   /** Indices into `customWords` already drawn this game. */
   usedCustom: Set<number>;
+  /** Index into `customWords` -> the turn it was last offered on. */
+  customOffered: Map<number, number>;
+  /** Turns begun this game, counting from 1; paces the custom words. */
+  turnNo: number;
   /** Normalized text of every word drawn this game, from any source. */
   drawn: Set<string>;
   /**

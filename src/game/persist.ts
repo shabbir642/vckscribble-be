@@ -91,6 +91,9 @@ export function loadRooms(now = Date.now()): { room: Room; downtimeMs: number }[
       // Snapshots from before vote kicks existed.
       room.kickVotes ??= new Map();
       room.banned ??= new Set();
+      // Snapshots from before custom words were paced.
+      room.customOffered ??= new Map();
+      room.turnNo ??= 0;
       for (const p of room.players.values()) {
         p.connected = false;
         p.socketId = null;

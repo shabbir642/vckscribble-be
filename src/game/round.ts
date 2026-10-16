@@ -140,6 +140,8 @@ export class RoundEngine {
     room.turnIndex = 0;
     room.usedWordIds = [];
     room.usedCustom = new Set();
+    room.customOffered = new Map();
+    room.turnNo = 0;
     room.drawn = new Set();
     room.customCounts = {};
     room.round = {
@@ -178,6 +180,7 @@ export class RoundEngine {
       return;
     }
 
+    room.turnNo++;
     const choices = pickChoices({
       packs: room.settings.wordPacks,
       difficulty: room.settings.difficulty,
@@ -185,6 +188,12 @@ export class RoundEngine {
       usedIds: room.usedWordIds,
       custom: room.customWords,
       usedCustom: room.usedCustom,
+      drawn: room.drawn,
+      customOffered: room.customOffered,
+      turn: room.turnNo,
+      turnsLeft:
+        room.drawOrder.length - room.turnIndex +
+        room.drawOrder.length * Math.max(0, room.settings.rounds - room.round.round),
       customOnly: room.settings.customWordsOnly,
     });
     if (!choices.length) {
@@ -193,6 +202,7 @@ export class RoundEngine {
       return;
     }
     room.offered = choices;
+    for (const c of choices) if (c.id < 0) room.customOffered.set(customIndex(c.id), room.turnNo);
 
     const endsAt = Date.now() + room.settings.selectSeconds * 1000;
     room.round = {
@@ -288,11 +298,12 @@ export class RoundEngine {
   private beginDrawing(room: Room, active: Room['active']): void {
     if (!active) return;
     this.advance(room);
-    // Words offered but passed over are spent too: being offered the same
-    // three words again two turns later felt like a broken shuffle.
+    // Dictionary words offered but passed over are spent too: being offered
+    // the same three words again two turns later felt like a broken shuffle.
+    // A host's word passed over stays in play — the host wants it drawn — and
+    // sits out a couple of turns instead (see pickChoices).
     for (const o of room.offered) {
       if (o.id > 0 && !room.usedWordIds.includes(o.id)) room.usedWordIds.push(o.id);
-      else if (o.id < 0) room.usedCustom.add(customIndex(o.id));
     }
     room.active = active;
     room.offered = [];

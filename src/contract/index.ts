@@ -38,7 +38,7 @@ export interface Player {
 /**
  * Votes needed to kick a player: a majority of everyone else present. A vote
  * needs at least 3 players in the room, or one person could throw out the
- * other; the host can kick outright in any room.
+ * other; the host can kick outright in any room. The host cannot be kicked.
  */
 export const MIN_PLAYERS_FOR_KICK_VOTE = 3;
 export function kickVotesNeeded(presentPlayers: number): number {
@@ -273,7 +273,8 @@ export interface ClientToServerEvents {
   /**
    * Kick a player. The host's request removes them at once; anyone else's is
    * a vote (sending it again withdraws it), and a majority removes them. A
-   * kicked player cannot rejoin the room from the same browser.
+   * kicked player cannot rejoin the room from the same browser. The host
+   * cannot be kicked.
    */
   'player:kick': (
     p: { playerId: string },
