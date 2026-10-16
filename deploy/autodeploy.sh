@@ -80,7 +80,7 @@ healthy() {
     curl -fsS --max-time 5 --resolve "$domain:443:127.0.0.1" "https://$domain/api/health" 2>/dev/null \
       | grep -q "\"contractVersion\":$1" \
       && curl -fsS --max-time 5 --resolve "$domain:443:127.0.0.1" "https://$domain/" 2>/dev/null \
-      | grep -q 'vmock skribble' && return 0
+      | grep -q 'id="root"' && return 0
     sleep 5
   done
   return 1

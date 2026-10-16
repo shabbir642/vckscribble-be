@@ -1,4 +1,4 @@
-# Deploying vmock skribble
+# Deploying Drawdle
 
 One VPS runs everything: Caddy (HTTPS, static frontend, reverse proxy) in front
 of the Node backend, with SQLite on a Docker volume. These steps take a fresh

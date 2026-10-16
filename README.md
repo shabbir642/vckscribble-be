@@ -1,6 +1,6 @@
 # vckscribble-be
 
-Backend for **vckscribble** — a corporate-slang drawing-and-guessing game.
+Backend for **Drawdle** — a corporate-slang drawing-and-guessing game.
 Node + Express + Socket.IO + SQLite (Drizzle).
 
 Frontend lives in [`vckscribble-fe`](https://github.com/shabbir642/vckscribble-fe).

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# One-time setup for a fresh Ubuntu 24.04 VPS that will run vmock skribble.
+# One-time setup for a fresh Ubuntu 24.04 VPS that will run Drawdle.
 # Safe to re-run: every step checks before it changes anything.
 #
 #   scp deploy/setup-server.sh root@<server-ip>:  &&  ssh root@<server-ip> bash setup-server.sh

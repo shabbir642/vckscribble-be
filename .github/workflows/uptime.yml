@@ -36,7 +36,7 @@ jobs:
           probe() {
             local page health poll lag
             page=$(curl -fsS --max-time 15 "$SITE/") || { echo "home page unreachable"; return 1; }
-            grep -q 'vmock skribble' <<<"$page" || { echo "home page served something unexpected"; return 1; }
+            grep -q 'id="root"' <<<"$page" || { echo "home page served something unexpected"; return 1; }
             health=$(curl -fsS --max-time 15 "$SITE/api/health") || { echo "/api/health unreachable"; return 1; }
             [ "$(jq -r .ok <<<"$health" 2>/dev/null)" = true ] || { echo "/api/health is not answering as the game server"; return 1; }
             lag=$(jq -r '.loopLagMs.p99 // 0' <<<"$health")
