@@ -1,4 +1,5 @@
 import type { HttpRequest, HttpResponse } from 'uWebSockets.js';
+import { isCloudflare } from './cloudflare.js';
 
 /**
  * The few HTTP routes the backend has, served by uWebSockets.js directly.
@@ -47,20 +48,35 @@ export function readRequest(res: HttpResponse, req: HttpRequest, trustProxy: boo
     method: req.getCaseSensitiveMethod().toUpperCase(),
     url: req.getUrl(),
     headers,
-    ip: clientIp(Buffer.from(res.getRemoteAddressAsText()).toString(), headers['x-forwarded-for'], trustProxy),
+    ip: clientIp(
+      Buffer.from(res.getRemoteAddressAsText()).toString(),
+      headers['x-forwarded-for'],
+      trustProxy,
+      headers['cf-connecting-ip'],
+    ),
   };
 }
 
 /**
  * Who is on the other end. A TCP connection — a player connecting directly —
- * has a real address that cannot be forged, so it wins. The Unix socket has
- * none: that is Caddy, and the client is the last X-Forwarded-For hop it
- * appended, trusted only with `trustProxy` (a direct client could otherwise
- * send any X-Forwarded-For it liked to dodge per-IP limits).
+ * has a real address that cannot be forged, so it wins; unless it is
+ * Cloudflare's, when the player is the one Cloudflare names in
+ * CF-Connecting-IP. The Unix socket has no address: that is Caddy, and the
+ * client is the last X-Forwarded-For hop it appended (Caddy resolves
+ * Cloudflare the same way), trusted only with `trustProxy` (a direct client
+ * could otherwise send any X-Forwarded-For it liked to dodge per-IP limits).
  */
-export function clientIp(remote: string, xff: string | undefined, trustProxy: boolean): string {
+export function clientIp(
+  remote: string,
+  xff: string | undefined,
+  trustProxy: boolean,
+  cfConnectingIp?: string,
+): string {
   const direct = normalizeIp(remote);
-  if (direct) return direct;
+  if (direct) {
+    const viaCf = cfConnectingIp?.trim();
+    return viaCf && isCloudflare(direct) ? normalizeIp(viaCf) : direct;
+  }
   const forwarded = trustProxy ? xff?.split(',').pop()?.trim() : undefined;
   return forwarded || 'unknown';
 }

@@ -11,7 +11,7 @@ import { CONTRACT_VERSION } from './contract/index.js';
 import { ensureSchema, sqlite, stmt } from './db/index.js';
 import { seedWords } from './db/seed.js';
 import { clientLog, sweepClientLog } from './http/clientLog.js';
-import { certFiles, waitForCerts, watchRenewal, type TlsConfig } from './http/tls.js';
+import { certFiles, present, waitForCerts, watchRenewal, type TlsConfig } from './http/tls.js';
 import {
   clientIp,
   corsHeaders,
@@ -54,7 +54,9 @@ const SOCKET_PATH = (() => {
  */
 const TLS: TlsConfig | null = (() => {
   const dir = process.env.TLS_CERT_DIR?.trim();
-  const domains = [process.env.TLS_DOMAIN?.trim()].filter((d): d is string => Boolean(d));
+  // Comma-separated: every site name players may connect to; the first is
+  // the default certificate.
+  const domains = (process.env.TLS_DOMAIN ?? '').split(',').map((d) => d.trim()).filter(Boolean);
   return dir && domains.length ? { dir, domains } : null;
 })();
 const DIRECT_BASE = Number(process.env.DIRECT_PORT ?? 8443);
@@ -212,11 +214,12 @@ io.attachApp(app);
  */
 let directSockets = 0;
 io.use((socket, next) => {
-  const xff = socket.handshake.headers['x-forwarded-for'];
+  const { 'x-forwarded-for': xff, 'cf-connecting-ip': cf } = socket.handshake.headers;
   const ip = clientIp(
     socket.handshake.address,
     Array.isArray(xff) ? xff.join(',') : xff,
     TRUST_PROXY,
+    Array.isArray(cf) ? cf[0] : cf,
   );
   if (!openConnection(ip)) {
     next(new Error('Too many connections from your network'));
@@ -304,6 +307,23 @@ const sweeper = setInterval(() => {
 }, 30_000);
 sweeper.unref();
 
+/**
+ * The other site names on the direct port. Each gets its own certificate by
+ * SNI — and, in uWS, its own routes, so the game's are added for it too.
+ * They share the one engine, so a room spans every name. Last before
+ * listening: app.domain() points every later route at that name.
+ */
+if (TLS) {
+  for (const name of TLS.domains.slice(1)) {
+    if (!present(TLS.dir, name)) {
+      console.log(`[tls] no certificate for ${name} yet; serving it once one arrives`);
+      continue;
+    }
+    app.addServerName(name, certFiles(TLS.dir, name));
+    (io.engine as unknown as { attach(app: UWS.TemplatedApp, o: object): void })
+      .attach(app.domain(name), { path: io.path() });
+  }
+}
 
 const listenSockets: UWS.us_listen_socket[] = [];
 const onListen = (where: string) => (sock: UWS.us_listen_socket | false) => {

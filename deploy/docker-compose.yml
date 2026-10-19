@@ -20,7 +20,7 @@ services:
       # serves HTTPS itself with Caddy's certificate (copied in by
       # sync-certs.sh): game frames skip Caddy entirely.
       TLS_CERT_DIR: /certs
-      TLS_DOMAIN: ${GAME_HOST:?set GAME_HOST in deploy/.env (see .env.example)}
+      TLS_DOMAIN: ${GAME_HOST:?set GAME_HOST in deploy/.env (see .env.example)},${EXTRA_GAME_HOSTS:-}
       DIRECT_PORT: ${DIRECT_PORT:-8443}
       # Players whose network allows only port 443 come through Caddy instead,
       # over these Unix sockets on a shared volume, one per process.
@@ -45,7 +45,8 @@ services:
     build:
       context: ../../vckscribble-fe
       args:
-        VITE_DIRECT_SOCKET_HOST: ${GAME_HOST}
+        # Each page connects to the name it was loaded from, if it is one of these.
+        VITE_DIRECT_SOCKET_HOST: ${GAME_HOST},${EXTRA_GAME_HOSTS:-}
         VITE_DIRECT_SOCKET_PORT: ${DIRECT_PORT:-8443}
     restart: unless-stopped
     # Started, not healthy: on a new server the backend waits for the
