@@ -47,7 +47,9 @@ handle @backend {
 }
 
 # Frontend: the static bundle. Hashed assets cache forever; the HTML never
-# does, so a deploy is picked up on the next page load.
+# does, so a deploy is picked up on the next page load. The guide pages are
+# files like how-to-play.html, served at /how-to-play; anything else is the
+# game.
 handle {
 	root * /srv
 	encode zstd gzip
@@ -55,6 +57,6 @@ handle {
 	header @assets Cache-Control "public, max-age=31536000, immutable"
 	@html not path /assets/*
 	header @html Cache-Control "no-cache"
-	try_files {path} /index.html
+	try_files {path} {path}.html /index.html
 	file_server
 }
