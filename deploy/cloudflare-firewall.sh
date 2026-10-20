@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
 #
-# Lets web and game traffic in only from Cloudflare, once the site is behind
-# it: a flood aimed at the server's own address is then dropped here instead
-# of reaching Caddy or the game. SSH is left alone.
+# Lets website traffic (443) in only from Cloudflare, once the site is behind
+# it: an attack on the site that skips Cloudflare by aiming at the server's
+# own address is dropped here instead of reaching Caddy. SSH is left alone.
+#
+# Port 80 stays open to everyone (Let's Encrypt validates the game's own
+# names there), and so do the direct game ports: the game's live connection
+# goes straight to the server on an unproxied name (GAME_HOST and
+# EXTRA_GAME_HOSTS, e.g. play.<site>), because a CDN detour can add hundreds
+# of milliseconds. If that path is attacked or blocked, players fall back to
+# the game through the site on 443 — through Cloudflare.
 #
 #   cloudflare-firewall.sh          show what it would do
-#   cloudflare-firewall.sh apply    allow 80, 443 and the direct game ports
-#                                   from Cloudflare's current ranges only
-#   cloudflare-firewall.sh undo     open them to everyone again
+#   cloudflare-firewall.sh apply    allow 443 from Cloudflare's current ranges only
+#   cloudflare-firewall.sh undo     open it to everyone again
 #
-# `apply` refuses while any name in DOMAIN still resolves to something other
-# than Cloudflare: players reaching the server directly would be cut off.
+# `apply` refuses while any site name in DOMAIN (the game's direct names
+# aside) still resolves to something other than Cloudflare: players reaching
+# the site directly would be cut off.
 # Safe to rerun; monthly from cron keeps the ranges current:
 #
 #   (crontab -l 2>/dev/null; echo "17 4 1 * * /opt/vmock-skribble/vckscribble-be/deploy/cloudflare-firewall.sh apply >> /var/log/vmock-firewall.log 2>&1") | crontab -
@@ -18,7 +25,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 TAG=cloudflare
-PORTS=80,443,8443:8458
+PORT=443
 mode=${1:-check}
 log() { echo "$(date -u '+%F %T') $*"; }
 
@@ -27,13 +34,14 @@ remove_ours() {
   ufw status numbered | sed -n "s/^\[ *\([0-9]*\)\].*# $TAG\$/\1/p" | sort -rn |
     while read -r n; do ufw --force delete "$n" >/dev/null; done
 }
-# The setup script's open-to-everyone rules.
-open_rules() { echo "80/tcp 443/tcp 443/udp 8443:8458/tcp"; }
+# The setup script's open-to-everyone rules for that port. HTTP/3 (443/udp)
+# goes too: browsers speak it to Cloudflare, and Cloudflare reaches us on TCP.
+open_rules() { echo "443/tcp 443/udp"; }
 
 if [ "$mode" = undo ]; then
   remove_ours
   for r in $(open_rules); do ufw allow "$r" >/dev/null; done
-  log "web and game ports open to everyone again"
+  log "port 443 open to everyone again"
   exit 0
 fi
 
@@ -51,9 +59,11 @@ sys.exit(0 if any(ip in ipaddress.ip_network(r) for r in sys.argv[2:]) else 1)
 EOF
 }
 
+direct=" $({ grep -E '^(GAME_HOST|EXTRA_GAME_HOSTS)=' .env || true; } | cut -d= -f2- | tr -d ' "' | tr ',' ' ') "
 names=$(sed -n 's/^DOMAIN=//p' .env | tr -d ' "' | tr ',' ' ')
 ready=1
 for name in $names; do
+  case "$direct" in *" $name "*) log "$name: the game's direct name, stays off Cloudflare"; continue ;; esac
   addrs=$(getent ahosts "$name" | awk '{print $1}' | sort -u || true)
   [ -n "$addrs" ] || { log "$name does not resolve"; ready=0; continue; }
   for a in $addrs; do
@@ -69,7 +79,7 @@ fi
 
 remove_ours
 for r in $ranges; do
-  ufw allow proto tcp from "$r" to any port "$PORTS" comment "$TAG" >/dev/null
+  ufw allow proto tcp from "$r" to any port "$PORT" comment "$TAG" >/dev/null
 done
 for r in $(open_rules); do ufw --force delete allow "$r" >/dev/null 2>&1 || true; done
-log "web and game ports now accept Cloudflare only ($(echo "$ranges" | wc -l) ranges)"
+log "port 443 now accepts Cloudflare only ($(echo "$ranges" | wc -l) ranges); 80 and the game ports stay open"
