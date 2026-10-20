@@ -158,6 +158,22 @@ container that crashes), and clears old images when the disk fills up:
 (crontab -l 2>/dev/null; echo "* * * * * /opt/vmock-skribble/vckscribble-be/deploy/autodeploy.sh >> /var/log/vmock-deploy.log 2>&1") | crontab -
 ```
 
+## 8b. Pages from Cloudflare's edge
+
+Behind Cloudflare, pages can be answered from its edge near the player
+instead of from this server. Caddy marks them as cacheable for a day at the
+edge only, and every deploy clears the copies, so nobody gets a stale page.
+
+1. In Cloudflare: My Profile → API Tokens → Create Token → Custom token, with
+   Zone · Zone · Read, Zone · Cache Purge · Purge and Zone · Cache Rules ·
+   Edit, for the site zones only.
+2. On the server, add it to `deploy/.env` as `CF_API_TOKEN=...`.
+3. Run `deploy/cloudflare-cache.sh setup` once, then `deploy/cloudflare-cache.sh check`:
+   the second request for each name should say `HIT`.
+
+Without the token, deploys skip the purge, and pages are not cached until
+`setup` has run.
+
 ## Updating
 
 Push to `main`. Within a minute of CI passing, the server deploys it

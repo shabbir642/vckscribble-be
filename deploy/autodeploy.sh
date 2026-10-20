@@ -85,7 +85,16 @@ healthy() {
   done
   return 1
 }
-build() { (cd "$BE/deploy" && docker compose up -d --build --remove-orphans) > "$STATE/build.log" 2>&1; }
+# The Caddyfile is mounted as a single file, and git replaces rather than
+# rewrites it: the running web container keeps the old one until restarted.
+caddy_changed=
+git -C "$BE" diff --quiet "$be_old" "$be_new" -- deploy/Caddyfile || caddy_changed=1
+build() {
+  (cd "$BE/deploy" && docker compose up -d --build --remove-orphans \
+    && { [ -z "$caddy_changed" ] || docker compose restart web; }) > "$STATE/build.log" 2>&1
+}
+# Pages cached at Cloudflare's edge would outlive the deploy; drop them.
+purge() { "$BE/deploy/cloudflare-cache.sh" purge || log "cache purge failed; pages may be stale for up to a day"; }
 
 log "deploying backend ${be_old:0:7} -> ${be_new:0:7}, frontend ${fe_old:0:7} -> ${fe_new:0:7} (contract v$be_v)"
 rm -f "$STATE/last_note"
@@ -93,6 +102,7 @@ git -C "$BE" reset -q --hard "$be_new"
 git -C "$FE" reset -q --hard "$fe_new"
 if build && healthy "$be_v"; then
   log "deployed and healthy"
+  purge
   docker image prune -f >/dev/null
   exit 0
 fi
@@ -102,7 +112,7 @@ tail -20 "$STATE/build.log" | sed 's/^/  /'
 echo "$target" >> "$STATE/failed"
 git -C "$BE" reset -q --hard "$be_old"
 git -C "$FE" reset -q --hard "$fe_old"
-if build; then log "rolled back to ${be_old:0:7} / ${fe_old:0:7}"; else log "ROLLBACK BUILD FAILED — check docker compose ps"; fi
+if build; then log "rolled back to ${be_old:0:7} / ${fe_old:0:7}"; purge; else log "ROLLBACK BUILD FAILED — check docker compose ps"; fi
 }
 main "$@"
 exit

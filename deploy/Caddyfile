@@ -51,17 +51,30 @@ handle @backend {
 	}
 }
 
-# Frontend: the static bundle. Hashed assets cache forever; the HTML never
-# does, so a deploy is picked up on the next page load. The guide pages are
-# files like how-to-play.html, served at /how-to-play; anything else is the
-# game.
+# Frontend: the static bundle. Hashed assets cache forever. Pages are
+# revalidated by browsers on every load, so a deploy shows on the next one,
+# while Cloudflare keeps a copy at its edge for a day (Cloudflare-CDN-Cache-
+# Control is read by Cloudflare alone) — close to the player, and cleared by
+# every deploy (cloudflare-cache.sh purge, from autodeploy.sh).
+#
+# The guide pages are files like how-to-play.html, served at /how-to-play;
+# any other address is the game. A missing asset is a 404, never the page:
+# that would be cached for a year as the script.
 handle {
 	root * /srv
 	encode zstd gzip
-	@assets path /assets/*
+	@assets {
+		path /assets/*
+		file
+	}
 	header @assets Cache-Control "public, max-age=31536000, immutable"
 	@html not path /assets/*
 	header @html Cache-Control "no-cache"
-	try_files {path} {path}.html /index.html
+	header @html Cloudflare-CDN-Cache-Control "max-age=86400"
+	@page {
+		not path /assets/*
+		file {path} {path}.html /index.html
+	}
+	rewrite @page {file_match.relative}
 	file_server
 }
