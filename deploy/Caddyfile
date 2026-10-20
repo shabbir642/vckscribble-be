@@ -13,6 +13,11 @@
 # DOMAIN=:80 serves plain HTTP on the server's IP, e.g. before DNS is ready.
 {$DOMAIN}
 
+# One address per site for search engines: www.drawdle.in/x -> drawdle.in/x
+# (and the same for every other www name in DOMAIN), permanently.
+@www header_regexp www Host ^www\.(.+)$
+redir @www https://{re.www.1}{uri} 301
+
 # Backend, for players whose network blocks the direct game port (everyone
 # else connects to the game server itself, on GAME_HOST:8443 + N). Over the
 # Unix sockets the game-server processes listen on (a volume shared by both
