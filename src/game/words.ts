@@ -26,7 +26,7 @@ import type { ActiveWord } from './types.js';
 const PICK_SQL = `
   SELECT id, text, drawability FROM words
   WHERE enabled = 1
-    AND pack IN (SELECT value FROM json_each(?))
+    AND (pack IN (SELECT value FROM json_each(?)) OR also_pack IN (SELECT value FROM json_each(?)))
     AND drawability IN (SELECT value FROM json_each(?))
     AND id NOT IN (SELECT value FROM json_each(?))
   ORDER BY times_drawn ASC, RANDOM()
@@ -246,7 +246,7 @@ export function pickChoices(o: ChoiceOptions): WordChoice[] {
     // Fresh: nothing used this game. Otherwise only avoid repeating a word
     // already in this set of choices.
     const skip = fresh ? [...exclude] : chosen.map((c) => c.id).filter((id) => id > 0);
-    return stmt(PICK_SQL).get(packsJson, JSON.stringify(tiers), JSON.stringify(skip)) as
+    return stmt(PICK_SQL).get(packsJson, packsJson, JSON.stringify(tiers), JSON.stringify(skip)) as
       | WordRow
       | undefined;
   };

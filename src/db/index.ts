@@ -59,6 +59,7 @@ export function ensureSchema(): void {
       normalized TEXT NOT NULL,
       category TEXT NOT NULL DEFAULT 'general',
       pack TEXT NOT NULL DEFAULT 'slang',
+      also_pack TEXT,
       drawability INTEGER NOT NULL DEFAULT 2,
       enabled INTEGER NOT NULL DEFAULT 1,
       source TEXT NOT NULL DEFAULT 'seed',
@@ -91,6 +92,9 @@ export function ensureSchema(): void {
   }
   if (!cols.some((c) => c.name === 'pack')) {
     sqlite.exec(`ALTER TABLE words ADD COLUMN pack TEXT NOT NULL DEFAULT 'slang'`);
+  }
+  if (!cols.some((c) => c.name === 'also_pack')) {
+    sqlite.exec('ALTER TABLE words ADD COLUMN also_pack TEXT');
   }
   sqlite.exec(
     'CREATE INDEX IF NOT EXISTS words_pack_idx ON words (enabled, pack, drawability)',

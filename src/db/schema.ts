@@ -22,6 +22,8 @@ export const words = sqliteTable(
     category: text('category').notNull().default('general'),
     /** The word pack a host can switch on or off (see WORD_PACKS). */
     pack: text('pack').notNull().default('slang'),
+    /** A second pack it also belongs to: samosa is food, and desi too. */
+    alsoPack: text('also_pack'),
     /**
      * 1 = draws itself, 3 = abstract. For corporate slang this tracks
      * DRAWABILITY, not obscurity — see PLAN.md §1. Correct it against

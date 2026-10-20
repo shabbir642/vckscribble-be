@@ -215,6 +215,30 @@ export const WORD_PACKS_SEED: Record<
     hard: `prophecy, curse, destiny, parallel universe, time travel, déjà vu, multiverse,
       telepathy, immortality, shapeshifter, doppelganger, minotaur`,
   },
+  desi: {
+    easy: `samosa, jalebi, ladoo, dosa, idli, roti, naan, paratha, biryani, chai, kulfi, lassi,
+      pani puri, vada pav, thali, pakora, rasgulla, gulab jamun, momos, paan, rangoli, diya,
+      mehendi, bindi, bangles, saree, kurta, turban, lungi, dhoti, chappal, jhumka, tabla, sitar,
+      dhol, matka, tiffin box, pressure cooker, charpai, hand pump, auto rickshaw, cycle rickshaw,
+      taj mahal, india gate, cricket bat, stumps, kite festival, coconut tree, banyan tree, cow on
+      the road, holi, diwali, sparkler`,
+    medium: `cutting chai, filter coffee, masala dosa, chole bhature, pav bhaji, kaju katli,
+      sugarcane juice, nimbu pani, coconut water, street food stall, chaiwala, dabbawala,
+      local train, overcrowded bus, traffic jam, speed breaker, honking, power cut, monsoon,
+      mosquito net, bucket bath, steel tumbler, rolling pin, tandoor, spice box, pickle jar,
+      dupatta, sherwani, nose ring, anklet, wedding baraat, mandap, dandiya, garba, bhangra,
+      kathakali, bharatanatyam, eid, pongal, onam, durga puja, navratri, raksha bandhan, lohri
+      bonfire, red fort, gateway of india, qutub minar, charminar, hawa mahal, howrah bridge,
+      houseboat, ghat, marine drive, gully cricket, sixer, hat trick, run out, wicket keeper,
+      umpire, googly, yorker, kabaddi, carrom, ludo, snakes and ladders, antakshari,
+      dumb charades, rain dance, hero entry, villain laugh, item song, evil eye charm,
+      tuition class, board exams, school assembly, report card, rickshaw ride, train window seat`,
+    hard: `jugaad, timepass, chalta hai, bas paanch minute, ghar ka khana, log kya kahenge,
+      indian stretchable time, sharma ji ka beta, arranged marriage, bargaining, overthinking chai,
+      lost at the mela, dance in switzerland, slow motion entry, family drama, sholay, lagaan,
+      3 idiots, dangal, taare zameen par, chak de india, baahubali, mother india,
+      dilwale dulhania le jayenge, hum aapke hain koun, mughal e azam`,
+  },
 };
 
 /** Flattens the packs into seed rows: [text, pack, drawability]. */

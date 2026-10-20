@@ -73,13 +73,14 @@ export interface Stroke {
 
 export type WordPackId =
   | 'everyday' | 'animals' | 'food' | 'office' | 'actions' | 'places'
-  | 'nature' | 'sports' | 'tech' | 'jobs' | 'fantasy' | 'slang';
+  | 'nature' | 'sports' | 'tech' | 'jobs' | 'fantasy' | 'desi' | 'slang';
 
 /** What a host can pick from, in display order. */
 export const WORD_PACKS: { id: WordPackId; label: string; emoji: string }[] = [
   { id: 'everyday', label: 'Everyday things', emoji: '🧦' },
   { id: 'animals', label: 'Animals', emoji: '🐼' },
   { id: 'food', label: 'Food & drink', emoji: '🍕' },
+  { id: 'desi', label: 'Desi', emoji: '🪔' },
   { id: 'office', label: 'Office stuff', emoji: '📎' },
   { id: 'actions', label: 'Actions', emoji: '🤸' },
   { id: 'places', label: 'Places', emoji: '🏰' },
