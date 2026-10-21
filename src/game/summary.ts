@@ -262,26 +262,35 @@ export function pickAwards(players: SummaryPlayer[]): Award[] {
 }
 
 /**
+ * Strokes this short stay whole when a drawing is thinned. Shapes are short
+ * strokes whose every point matters (a rectangle hangs each corner on one
+ * point, a circle closes on its last); freehand is dense enough to lose some.
+ */
+const WHOLE_PAIRS = 80;
+
+/**
  * A copy of `strokes` with at most `maxPairs` point pairs in all, for a payload
- * every client can take. Brush and eraser strokes keep every k-th pair plus
- * their first and last, with the smallest k that fits; a fill is a single pair
- * and stays as it is. The originals are never touched.
+ * every client can take. Brush and eraser strokes longer than WHOLE_PAIRS keep
+ * every k-th pair plus their first and last, with the smallest k that fits;
+ * fills (a single pair) and short strokes stay as they are. The originals are
+ * never touched.
  */
 export function thinStrokes(strokes: readonly Stroke[], maxPairs = BEST_DRAWING_MAX_POINTS): Stroke[] {
   const pairs = (s: Stroke) => Math.floor(s.points.length / 2);
+  const whole = (s: Stroke) => s.tool === 'fill' || pairs(s) <= WHOLE_PAIRS;
   // Pairs 0, k, 2k... plus the last one when the step does not land on it.
   const kept = (n: number, k: number) =>
     n === 0 ? 0 : Math.ceil(n / k) + ((n - 1) % k === 0 ? 0 : 1);
   const total = (k: number) =>
-    strokes.reduce((sum, s) => sum + (s.tool === 'fill' ? pairs(s) : kept(pairs(s), k)), 0);
+    strokes.reduce((sum, s) => sum + (whole(s) ? pairs(s) : kept(pairs(s), k)), 0);
 
   // Past the longest stroke every stroke is down to its first and last pair.
-  const longest = strokes.reduce((n, s) => (s.tool === 'fill' ? n : Math.max(n, pairs(s))), 1);
+  const longest = strokes.reduce((n, s) => (whole(s) ? n : Math.max(n, pairs(s))), 1);
   let k = 1;
   while (k < longest && total(k) > maxPairs) k++;
 
   const out = strokes.map((s): Stroke => {
-    if (s.tool === 'fill' || k === 1) return { ...s, points: s.points.slice() };
+    if (whole(s) || k === 1) return { ...s, points: s.points.slice() };
     const n = pairs(s);
     const points: number[] = [];
     for (let i = 0; i < n; i++) {

@@ -178,4 +178,5 @@ sockets, 400-join burst). Raise them for bigger events with
 | `pnpm smoke` | room lifecycle and drawing (37 cases, needs a running server) |
 | `pnpm smoke:game` | round machine (22 cases) |
 | `pnpm smoke:guess` | guessing & scoring (13 cases) |
+| `pnpm smoke:spelling` | spaces, capitals and punctuation in a guess don't count; a near miss is still "close" (27 cases) |
 | `pnpm smoke:summary` | end-of-game summary: a whole game, re-sends to late arrivals, play again, kicks, the final scoreboard (63 cases, ~30 s) |

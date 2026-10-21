@@ -5,6 +5,7 @@ import {
   type ClientToServerEvents,
   type ServerToClientEvents,
   type WordChoice,
+  guessKey,
   isCloseGuess,
   isHintable,
   maskWord,
@@ -511,7 +512,9 @@ export class RoundEngine {
       return;
     }
 
-    if (normalizeWord(text) === active!.normalized) {
+    // Spaces count no more than capitals or punctuation: "icecream" is a
+    // right answer to "Ice Cream", not a near miss.
+    if (guessKey(text) === guessKey(active!.text)) {
       this.award(room, player);
       return;
     }

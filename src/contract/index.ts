@@ -521,7 +521,8 @@ export const WORD_MIN = 3;
 export const WORD_MAX = 40;
 
 /**
- * Normalization used for guess matching AND duplicate detection.
+ * Normalization used for duplicate detection and storage (the dictionary's
+ * `normalized` column), and the first step of guess matching (see guessKey).
  * Lives here so the client can preview a guess with exactly the server's
  * logic — the server stays authoritative regardless.
  *
@@ -536,6 +537,20 @@ export function normalizeWord(input: string): string {
     .replace(/[^a-z0-9\s]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/**
+ * What a guess and the word are compared on: normalizeWord with every space
+ * removed, so "IceCream", "ice  cream", "ICE-CREAM" and "icecream" are all
+ * "ice cream", and "tajmahal" is "Taj Mahal". Nobody should lose a right
+ * answer to where they put a space.
+ *
+ * ONLY for comparing a guess with the word. Storage, duplicate detection and
+ * hints keep normalizeWord's spaces: the dictionary is keyed on them, and the
+ * mask shows where each word of a phrase ends.
+ */
+export function guessKey(input: string): string {
+  return normalizeWord(input).replace(/\s+/g, '');
 }
 
 /** A character a hint can reveal, and a guesser has to type. */
@@ -572,10 +587,15 @@ export function levenshtein(a: string, b: string): number {
   return prev[b.length]!;
 }
 
-/** Phrases get a looser threshold; short words must be near-exact. */
+/**
+ * Long answers get a looser threshold; short words must be near-exact. Length
+ * and distance are both measured on the guess keys, like the match itself, so
+ * a stray space is no mistake at all: "icecrem" is one letter off "ice cream".
+ * A guess that matches outright is never merely close.
+ */
 export function isCloseGuess(guess: string, solution: string): boolean {
-  const g = normalizeWord(guess);
-  const s = normalizeWord(solution);
+  const g = guessKey(guess);
+  const s = guessKey(solution);
   if (g === s) return false;
   const threshold = s.length > 15 ? 2 : 1;
   return levenshtein(g, s) <= threshold;
