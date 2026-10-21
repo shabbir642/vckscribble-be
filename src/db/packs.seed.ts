@@ -239,6 +239,32 @@ export const WORD_PACKS_SEED: Record<
       3 idiots, dangal, taare zameen par, chak de india, baahubali, mother india,
       dilwale dulhania le jayenge, hum aapke hain koun, mughal e azam`,
   },
+
+  /**
+   * Diwali is celebrated by Hindus, Sikhs and Jains and enjoyed by everyone in
+   * India, so the pack keeps to what all of them share: lights, sweets, gifts,
+   * family, the office party. No deities, no rituals, no card games (at Diwali
+   * they mean gambling). Many cities ban or restrict crackers, so sparklers
+   * and fireworks are the only ones here.
+   */
+  diwali: {
+    easy: `diya, rangoli, lantern, fairy lights, sparkler, fireworks, ladoo, mithai box, gift box,
+      gold coin, shopping bags, kurta, saree, lehenga, grandparents`,
+    medium: `marigold, dry fruits box, gift hamper, greeting card, family photo, toran,
+      marigold garland, lighting diyas, floating diyas, putting up lights,
+      tangled lights, kaju katli, soan papdi, sweet shop, making sweets, sharing sweets,
+      diwali cleaning, cleaning the fan, painting the house, new clothes, matching outfits,
+      shopping rush, diwali sale, online shopping, flower market, new car, empty wallet,
+      gift wrapping, opening gifts, gift exchange, relatives visiting, pile of shoes, bhai dooj,
+      family dinner, family video call, office diwali party, virtual party, ethnic day,
+      ramp walk, rangoli competition, stepping on rangoli, diya painting, desk decoration,
+      photo booth, team lunch, diwali bonus, diwali mela`,
+    hard: `festival of lights, good over evil, light over darkness, new beginnings, prosperity,
+      togetherness, family time, joy of giving, festive mood, diwali wishes, first diwali,
+      home for diwali, dhanteras shopping, last-minute shopping, regifting, sugar rush,
+      sweet tooth, sweets for breakfast, food coma, power bill, lights still up, long weekend,
+      leave approved, best dressed`,
+  },
 };
 
 /** Flattens the packs into seed rows: [text, pack, drawability]. */
