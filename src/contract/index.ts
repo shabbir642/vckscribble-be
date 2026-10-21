@@ -8,7 +8,7 @@
  * Keep this file dependency-free so both repos can consume it as-is.
  */
 
-export const CONTRACT_VERSION = 15;
+export const CONTRACT_VERSION = 16;
 
 /* ---------------------------------------------------------------- domain */
 
@@ -33,6 +33,41 @@ export interface Player {
   isHost: boolean;
   /** Ids of the present players voting to kick this one. */
   kickVotes: string[];
+  /** The player's team in a team game; null when everyone plays for themselves. */
+  teamId: TeamId | null;
+}
+
+/* ----------------------------------------------------------------- teams */
+
+/**
+ * - classic: everyone plays for themselves; everyone guesses every drawing.
+ * - teams: teams take turns; a drawer's own team guesses, and the first right
+ *   guess wins the turn for the team. The other teams know the word and watch.
+ */
+export type GameMode = 'classic' | 'teams';
+
+export type TeamId = 'mango' | 'grape' | 'watermelon' | 'kiwi';
+
+/** The teams a room can have, in order: a game with N teams uses the first N. */
+export const TEAMS: readonly { id: TeamId; name: string; emoji: string; colour: string }[] = [
+  { id: 'mango', name: 'Team Mango', emoji: '🥭', colour: '#ff8a3d' },
+  { id: 'grape', name: 'Team Grape', emoji: '🍇', colour: '#9775fa' },
+  { id: 'watermelon', name: 'Team Watermelon', emoji: '🍉', colour: '#ff5fa2' },
+  { id: 'kiwi', name: 'Team Kiwi', emoji: '🥝', colour: '#2bd46e' },
+];
+export const MIN_TEAMS = 2;
+export const MAX_TEAMS = 4;
+/** A team needs someone to draw and someone to guess. */
+export const MIN_TEAM_SIZE = 2;
+export const TEAM_NAME_MAX = 20;
+
+/** A team as everyone sees it. Its members are the players with its teamId. */
+export interface Team {
+  id: TeamId;
+  /** The default from TEAMS, or the host's rename. */
+  name: string;
+  /** Points won this game. */
+  score: number;
 }
 
 /**
@@ -116,13 +151,19 @@ export interface RoomSettings {
   customWordsOnly: boolean;
   /** How many custom words the host has added. The words stay with the host. */
   customWordCount: number;
+  mode: GameMode;
+  /** Teams in a team game, MIN_TEAMS to MAX_TEAMS; kept when switching back to classic. */
+  teamCount: number;
 }
+
+export const MIN_PLAYERS = 2;
+export const MAX_PLAYERS = 30;
 
 export const DEFAULT_SETTINGS: RoomSettings = {
   rounds: 3,
   drawSeconds: 25,
   selectSeconds: 15,
-  maxPlayers: 12,
+  maxPlayers: 30,
   allowCustomWords: true,
   wordPacks: ['everyday', 'animals', 'food', 'office', 'slang'],
   difficulty: 'mixed',
@@ -130,6 +171,8 @@ export const DEFAULT_SETTINGS: RoomSettings = {
   hints: 3,
   customWordsOnly: false,
   customWordCount: 0,
+  mode: 'classic',
+  teamCount: 2,
 };
 
 /** Selectable draw times, in seconds. */
@@ -150,6 +193,12 @@ export interface RoundState {
   solution: string | null;
   endsAt: number | null;
   guessedPlayerIds: string[];
+  /**
+   * In a team game, the team whose turn it is (the drawer's), from selecting
+   * through the reveal; null at the scoreboard, when finished, in the lobby,
+   * and in classic games.
+   */
+  teamId: TeamId | null;
   /** Guessers' 👍 / 👎 on the current drawing; reset every turn. */
   likes: number;
   dislikes: number;
@@ -157,7 +206,15 @@ export interface RoundState {
 
 export type Reaction = 'up' | 'down';
 
-export type ChatChannel = 'guess' | 'post-guess' | 'system';
+/**
+ * - guess: a guess, seen by everyone (in a team game, by the drawing team's
+ *   guesses, and the watchers).
+ * - post-guess: between players who already got the word, and the drawer.
+ * - watchers: in a team game, between the teams that are not drawing (they
+ *   know the word); never shown to the drawing team.
+ * - system: from the game itself.
+ */
+export type ChatChannel = 'guess' | 'post-guess' | 'watchers' | 'system';
 
 /**
  * How the client should colour a message. The server knows whether a guess was
@@ -183,6 +240,7 @@ export interface RoomPreview {
   players: number;
   maxPlayers: number;
   phase: RoundPhase;
+  mode: GameMode;
 }
 
 /**
@@ -285,6 +343,21 @@ export interface ClientToServerEvents {
   /** Change your own name/avatar. Only before a game starts (lobby/finished). */
   'player:update': (p: { name?: string; avatar?: number }, ack: Ack) => void;
   'room:start': (p: Record<string, never>, ack: Ack) => void;
+
+  /**
+   * Team game, in the lobby: move yourself to one of the game's teams. Teams
+   * need not stay even, but every team needs MIN_TEAM_SIZE connected players
+   * for the game to start.
+   */
+  'team:join': (p: { teamId: TeamId }, ack: Ack) => void;
+  /** Host only, in the lobby: deal everyone into even teams at random. */
+  'team:shuffle': (p: Record<string, never>, ack: Ack) => void;
+  /**
+   * The host, or any member of the team, in the lobby: rename a team. Names
+   * are unique across all four teams, ignoring case; an empty name restores
+   * the team's default (refused if another team now has that name).
+   */
+  'team:rename': (p: { teamId: TeamId; name: string }, ack: Ack) => void;
   /**
    * Host only: stop the game (or leave the final podium) and return everyone
    * to the lobby, where settings and words can be changed again.
@@ -342,12 +415,16 @@ export interface ServerToClientEvents {
     players: Player[];
     settings: RoomSettings;
     round: RoundState;
+    /** The game's teams in a team game, in TEAMS order; empty otherwise. */
+    teams: Team[];
     you: { playerId: string };
     /** The custom word list — sent to the host only, never to guessers. */
     hostWords?: string[];
   }) => void;
 
   'room:players': (p: { players: Player[] }) => void;
+  /** Team names or scores changed (membership travels with room:players). */
+  'room:teams': (p: { teams: Team[] }) => void;
   'round:state': (p: RoundState) => void;
   'round:tick': (p: { secondsLeft: number }) => void;
   'round:hint': (p: { maskedWord: string }) => void;
@@ -420,6 +497,19 @@ export interface GameSummary {
   turns: number;
   /** Ended early: too few players were left to carry on. */
   abandoned: boolean;
+  mode: GameMode;
+  /** A team game's teams, best first; null when everyone played for themselves. */
+  teams: TeamResult[] | null;
+}
+
+export interface TeamResult {
+  id: TeamId;
+  name: string;
+  score: number;
+  /** 1 is the winner; equal scores share a rank. */
+  rank: number;
+  /** Who played for it, the drawers and guessers alike, including anyone who left. */
+  memberIds: string[];
 }
 
 export interface SummaryPlayer {

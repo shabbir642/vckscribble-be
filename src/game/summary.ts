@@ -3,9 +3,11 @@ import {
   BEST_DRAWING_MAX_POINTS,
   type Award,
   type AwardId,
+  type GameMode,
   type GameSummary,
   type Stroke,
   type SummaryPlayer,
+  type TeamResult,
 } from '../contract/index.js';
 import type { PlayerRecord, Room, Tally } from './types.js';
 
@@ -59,6 +61,7 @@ export function tallyOf(room: Room, player: PlayerRecord): Tally {
     known.name = player.name;
     known.avatar = player.avatar;
     known.score = player.score;
+    known.teamId = player.teamId;
     return known;
   }
   const t: Tally = {
@@ -71,6 +74,7 @@ export function tallyOf(room: Room, player: PlayerRecord): Tally {
     drew: 0,
     solvedByOthers: 0,
     likes: 0,
+    teamId: player.teamId,
   };
   room.tally.set(player.id, t);
   return t;
@@ -114,9 +118,10 @@ export function recordTurn(room: Room): void {
   if (room.strokes.filter((s) => s.tool === 'fill').length > MAX_BEST_FILLS) return;
   // Who could have guessed: the players here now, as `award` counts them,
   // plus anyone who got it and has left since. Never fewer than the solvers.
+  // In a team game only the drawing team guesses; the others know the word.
   const guessers = new Set(round.guessedPlayerIds);
   for (const p of room.players.values()) {
-    if (p.connected && p.id !== seat.id) guessers.add(p.id);
+    if (p.connected && p.id !== seat.id && (!round.teamId || p.teamId === round.teamId)) guessers.add(p.id);
   }
   const score =
     round.likes * 3 - round.dislikes + (guessers.size ? (solvers / guessers.size) * 2 : 0);
@@ -207,7 +212,39 @@ export function buildSummary(room: Room, rounds: number, abandoned: boolean): Ga
         }
       : null;
 
-  return { id: room.gameId, players, awards: pickAwards(players), best, rounds, turns, abandoned };
+  // Read with care: smoke-summary's unit checks build bare rooms, without settings.
+  const mode: GameMode = room.settings?.mode ?? 'classic';
+  return {
+    id: room.gameId,
+    players,
+    awards: pickAwards(players, mode),
+    best,
+    rounds,
+    turns,
+    abandoned,
+    mode,
+    teams: mode === 'teams' ? teamResults(room, players) : null,
+  };
+}
+
+/**
+ * A team game's teams, best first (equals in TEAMS order, sharing a rank),
+ * each listing everyone in `players` who played for it: by their seat's team,
+ * or for anyone whose seat has gone, the team the tally last saw them on.
+ */
+function teamResults(room: Room, players: SummaryPlayer[]): TeamResult[] {
+  const teams: TeamResult[] = room.teams
+    .slice(0, room.settings.teamCount)
+    .map(({ id, name, score }) => ({ id, name, score, rank: 0, memberIds: [] }));
+  for (const p of players) {
+    const teamId = room.players.get(p.id)?.teamId ?? room.tally.get(p.id)?.teamId;
+    // Everyone has a team in a team game. Were a line ever without one, it
+    // still belongs somewhere: the results must not lose a player.
+    (teams.find((t) => t.id === teamId) ?? teams[0])?.memberIds.push(p.id);
+  }
+  teams.sort((a, b) => b.score - a.score);
+  for (const t of teams) t.rank = 1 + teams.filter((q) => q.score > t.score).length;
+  return teams;
 }
 
 interface AwardRule {
@@ -217,6 +254,8 @@ interface AwardRule {
   /** The lowest value wins (a time) rather than the highest. */
   lowest?: true;
   minPlayers?: number;
+  /** Means nothing in a team game. */
+  classicOnly?: true;
 }
 
 /** At least one: an award for nothing is no award. */
@@ -228,8 +267,9 @@ const AWARD_RULES: AwardRule[] = [
   { id: 'speedster', value: (p) => p.fastestMs, lowest: true },
   { id: 'sharpshooter', value: (p) => counted(p.guessed) },
   { id: 'storyteller', value: (p) => counted(p.solvedByOthers) },
-  // With two players the only guesser is always the first to get it.
-  { id: 'trailblazer', value: (p) => counted(p.firstGuesses), minPlayers: 3 },
+  // With two players the only guesser is always the first to get it; in a
+  // team game every right answer is the first, as it ends the turn.
+  { id: 'trailblazer', value: (p) => counted(p.firstGuesses), minPlayers: 3, classicOnly: true },
 ];
 
 /**
@@ -238,12 +278,13 @@ const AWARD_RULES: AwardRule[] = [
  * in. Someone who already has two is passed over, and when that leaves nobody
  * with the best value the award is dropped rather than handed to a runner-up.
  */
-export function pickAwards(players: SummaryPlayer[]): Award[] {
+export function pickAwards(players: SummaryPlayer[], mode: GameMode = 'classic'): Award[] {
   const held = new Map<string, number>();
   const count = (p: SummaryPlayer) => held.get(p.id) ?? 0;
   const awards: Award[] = [];
   for (const rule of AWARD_RULES) {
     if (players.length < (rule.minPlayers ?? 0)) continue;
+    if (rule.classicOnly && mode !== 'classic') continue;
     let best: number | null = null;
     for (const p of players) {
       const v = rule.value(p);

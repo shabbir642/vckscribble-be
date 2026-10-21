@@ -94,8 +94,10 @@ check('all offered words are easy to draw', choices.every((w) => w.drawability =
 if (existsSync('data/game.db')) {
   const { default: Database } = await import('better-sqlite3');
   const db = new Database('data/game.db', { readonly: true });
-  const packs = choices.map((w) => db.prepare('SELECT pack FROM words WHERE id = ?').get(w.id)?.pack);
-  check('all offered words come from the chosen pack', packs.every((p) => p === 'animals'), packs.join());
+  // A word can be in a pack as its second one (also_pack): "whale" is slang first, animals too.
+  const packs = choices.map((w) => db.prepare('SELECT pack, also_pack FROM words WHERE id = ?').get(w.id));
+  check('all offered words come from the chosen pack', packs.every((p) => p?.pack === 'animals' || p?.also_pack === 'animals'),
+    packs.map((p) => `${p?.pack}/${p?.also_pack}`).join());
   db.close();
 }
 

@@ -34,6 +34,11 @@ const SOCKET_LIMITS: Record<string, Limit> = {
   'room:settings': { perSecond: 5, burst: 10 },
   'player:update': { perSecond: 1, burst: 5 },
   'player:kick': { perSecond: 1, burst: 5 },
+  // Each re-sends the roster or the teams to everyone in a room of up to 30:
+  // someone hopping between teams must not flood it.
+  'team:join': { perSecond: 1, burst: 5 },
+  'team:shuffle': { perSecond: 1, burst: 5 },
+  'team:rename': { perSecond: 1, burst: 5 },
   // Clients ping every 10 s and report once a minute.
   'net:ping': { perSecond: 1, burst: 3 },
   'net:report': { perSecond: 0.1, burst: 3 },

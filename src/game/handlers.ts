@@ -3,13 +3,20 @@ import { z } from 'zod';
 import {
   shardOf,
   DRAW_TIMES,
+  MAX_PLAYERS,
   MAX_POINTS_PER_STROKE,
+  MAX_TEAMS,
+  MIN_PLAYERS,
+  MIN_TEAMS,
+  TEAMS,
+  TEAM_NAME_MAX,
   WORD_PACKS,
   type WordPackId,
   type ChatMessage,
   type ClientToServerEvents,
   type Failure,
   type ServerToClientEvents,
+  type TeamId,
 } from '../contract/index.js';
 import {
   appendPoints,
@@ -22,9 +29,9 @@ import {
 } from './drawing.js';
 import { allow, forgetSocket } from './limits.js';
 import type { RoundEngine } from './round.js';
-import { StoreError, store } from './store.js';
+import { MAX_ROUNDS, StoreError, store, tidyTeamName } from './store.js';
 import type { PlayerRecord, Room } from './types.js';
-import { parseCustomWords, reportWord } from './words.js';
+import { isBlocked, parseCustomWords, reportWord } from './words.js';
 import { recordNetReport } from './netStats.js';
 import { SHARD, SHARDS } from '../shard.js';
 
@@ -53,19 +60,34 @@ const DeviceId = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/).optional().catch(unde
 const PACK_IDS = WORD_PACKS.map((p) => p.id) as [WordPackId, ...WordPackId[]];
 const SettingsPatch = z
   .object({
-    rounds: z.number().int().min(1).max(10),
+    rounds: z.number().int().min(1).max(MAX_ROUNDS),
     drawSeconds: z.number().int().refine((n) => DRAW_TIMES.includes(n), 'Pick one of the listed draw times'),
     selectSeconds: z.number().int().min(5).max(60),
-    maxPlayers: z.number().int().min(2).max(16),
+    maxPlayers: z.number().int().min(MIN_PLAYERS).max(MAX_PLAYERS),
     allowCustomWords: z.boolean(),
     wordPacks: z.array(z.enum(PACK_IDS)).max(PACK_IDS.length).transform((a) => [...new Set(a)]),
     difficulty: z.enum(['easy', 'mixed', 'hard']),
     wordChoices: z.number().int().min(1).max(5),
     hints: z.number().int().min(0).max(5),
     customWordsOnly: z.boolean(),
+    mode: z.enum(['classic', 'teams']),
+    teamCount: z.number().int().min(MIN_TEAMS).max(MAX_TEAMS),
   })
   .partial()
   .strict();
+
+const TeamIdField = z.enum(TEAMS.map((t) => t.id) as [TeamId, ...TeamId[]]);
+const teamNameTooLong = `Team names can be up to ${TEAM_NAME_MAX} characters`;
+/**
+ * A team name, checked like a player's once tidied, so the limit counts what
+ * shows; empty asks for the team's default back. The first limit only spares
+ * the server tidying a huge payload.
+ */
+const TeamName = z
+  .string()
+  .max(TEAM_NAME_MAX * 10, teamNameTooLong)
+  .transform(tidyTeamName)
+  .pipe(z.string().max(TEAM_NAME_MAX, teamNameTooLong));
 
 function fail(code: Failure['code'], message: string): Failure {
   return { ok: false, code, message };
@@ -107,6 +129,7 @@ function systemMessage(text: string): ChatMessage {
  */
 export function emitStateToEach(io: IO, room: Room): void {
   const players = store.publicPlayers(room);
+  const teams = store.publicTeams(room);
   for (const p of room.players.values()) {
     if (!p.socketId) continue;
     io.sockets.sockets.get(p.socketId)?.emit('room:state', {
@@ -114,6 +137,7 @@ export function emitStateToEach(io: IO, room: Room): void {
       players,
       settings: room.settings,
       round: room.round,
+      teams,
       you: { playerId: p.id },
       ...(p.id === room.hostId ? { hostWords: room.customWords } : {}),
     });
@@ -141,7 +165,9 @@ function kickOut(
     'chat:message',
     systemMessage(by === 'host' ? `${target.name} was kicked by the host` : `${target.name} was voted out`),
   );
-  // Full state, not just the roster: kicking the host hands the role on.
+  // Full state, not just the roster: kicking the host hands the role on, and
+  // rounds that follow the room may change.
+  store.followRoom(room);
   emitStateToEach(io, room);
   engine.playerLeft(room, 0);
   console.log(`[io] ${target.name} kicked from ${room.code} (${by})`);
@@ -162,6 +188,7 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       players: store.publicPlayers(room),
       settings: room.settings,
       round: room.round,
+      teams: store.publicTeams(room),
       you: { playerId: player.id },
       // The custom list goes to the host alone: anyone else would be
       // reading the answers.
@@ -183,8 +210,14 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
     // Only once the game has finished: it is built then.
     if (room.summary) socket.emit('game:summary', room.summary);
   };
+  /**
+   * The roster, to everyone. Rounds that follow the room may change with it
+   * (see RoomStore.followRoom): then the whole state goes out too, as for a
+   * settings change.
+   */
   const broadcastPlayers = (room: Room) => {
     io.to(room.code).emit('room:players', { players: store.publicPlayers(room) });
+    if (store.followRoom(room)) emitStateToEach(io, room);
   };
   const toast = (e: unknown) => {
     const f = toFailure(e);
@@ -244,6 +277,9 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       sendResults(room);
       broadcastPlayers(room);
       if (room.strokes.length) socket.emit('draw:sync', { strokes: room.strokes });
+      // As on a resume: a seat reclaimed without its token may be the drawer's,
+      // and a newcomer may land on a team that watches knowing the word.
+      engine.resendTurnContext(room, player);
       io.to(room.code).emit('chat:message', systemMessage(`${name} joined`));
     } catch (e) {
       ack(toFailure(e));
@@ -303,13 +339,12 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       }
       broadcastPlayers(room);
       const voted = room.kickVotes.get(targetId)?.has(player.id);
+      const line = voted
+        ? `${player.name} voted to kick ${res.target.name} (${res.votes}/${res.needed})`
+        : `${player.name} took back their vote to kick ${res.target.name} (${res.votes}/${res.needed})`;
       io.to(room.code).emit(
         'chat:message',
-        systemMessage(
-          voted
-            ? `${player.name} voted to kick ${res.target.name} (${res.votes}/${res.needed})`
-            : `${player.name} took back their vote to kick ${res.target.name} (${res.votes}/${res.needed})`,
-        ),
+        systemMessage(res.teamNeeded ? `${line}. It needs a vote from ${res.teamNeeded} too.` : line),
       );
     } catch (e) {
       ack(toFailure(e));
@@ -408,9 +443,73 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       const midGame = room.round.phase !== 'finished';
       engine.reset(room);
       ack({ ok: true });
+      // Back in the lobby, rounds that follow the room catch up with whoever
+      // came and went during the game.
+      if (store.followRoom(room)) emitStateToEach(io, room);
       io.to(room.code).emit(
         'chat:message',
         systemMessage(midGame ? `${player.name} restarted the game` : `${player.name} is setting up another game`),
+      );
+    } catch (e) {
+      ack(toFailure(e));
+    }
+  });
+
+  /* -------------------------------------------------------------- teams */
+
+  socket.on('team:join', (payload, ack) => {
+    try {
+      // Every move re-sends the roster to the whole room.
+      if (!allow(socket.id, 'team:join')) {
+        ack(fail('RATE_LIMITED', 'Slow down a moment'));
+        return;
+      }
+      const teamId = TeamIdField.parse(payload?.teamId);
+      const { room, player } = seatOf(socket);
+      const moved = store.joinTeam(room, player, teamId);
+      ack({ ok: true });
+      if (moved) broadcastPlayers(room);
+    } catch (e) {
+      ack(toFailure(e));
+    }
+  });
+
+  socket.on('team:shuffle', (_payload, ack) => {
+    try {
+      if (!allow(socket.id, 'team:shuffle')) {
+        ack(fail('RATE_LIMITED', 'Slow down a moment'));
+        return;
+      }
+      const { room, player } = seatOf(socket);
+      store.shuffleTeams(room, player.id);
+      ack({ ok: true });
+      broadcastPlayers(room);
+      io.to(room.code).emit('chat:message', systemMessage(`${player.name} shuffled the teams`));
+    } catch (e) {
+      ack(toFailure(e));
+    }
+  });
+
+  socket.on('team:rename', (payload, ack) => {
+    try {
+      if (!allow(socket.id, 'team:rename')) {
+        ack(fail('RATE_LIMITED', 'Slow down a moment'));
+        return;
+      }
+      const teamId = TeamIdField.parse(payload?.teamId);
+      const name = TeamName.parse(payload?.name ?? '');
+      const { room, player } = seatOf(socket);
+      // Whether you may at all, before what you typed.
+      store.assertCanRenameTeam(room, player, teamId);
+      // A team's name is up on every screen: the filter for words applies.
+      if (name && isBlocked(name)) throw new StoreError('WORD_BLOCKED', "That name isn't allowed");
+      const renamed = store.renameTeam(room, player, teamId, name);
+      ack({ ok: true });
+      if (!renamed) return;
+      io.to(room.code).emit('room:teams', { teams: store.publicTeams(room) });
+      io.to(room.code).emit(
+        'chat:message',
+        systemMessage(`${player.name} renamed ${renamed.from} to ${renamed.to}`),
       );
     } catch (e) {
       ack(toFailure(e));

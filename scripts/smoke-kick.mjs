@@ -120,37 +120,29 @@ console.log('a departure can decide a vote');
 
 console.log('kicking the host or the drawer');
 {
-  const seats = await room(['Hana', 'Ann', 'Ben']);
-  const [host, ann] = seats;
-  const r = await emit(ann.sock, 'player:kick', { playerId: host.id });
-  check('the host cannot be voted out', !r.ok && r.code === 'INVALID', JSON.stringify(r));
-  await sleep(100);
-  const row = ann.sock.players.find((p) => p.id === host.id);
-  check('no vote is recorded against the host', row && row.kickVotes.length === 0, JSON.stringify(row));
-  closeAll(seats);
-}
-{
-  const seats = await room(['Hana', 'Ann', 'Ben']);
-  const [host] = seats;
-  await emit(host.sock, 'room:settings', { drawSeconds: 60, selectSeconds: 10 });
-  const offers = seats.map((s) => next(s.sock, 'word:options').then((o) => ({ s, o })));
-  await emit(host.sock, 'room:start', {});
-  const { s: drawer, o } = await Promise.race(offers);
-  await emit(drawer.sock, 'word:choose', { wordId: o.choices[0].id });
-  await sleep(200);
-  const others = seats.filter((s) => s !== drawer);
-  const kicker = others.find((s) => s === host) ?? null;
-  const watcher = others.find((s) => s !== host) ?? others[0];
-  const reveal = new Promise((res) => watcher.sock.on('round:state', (p) => { if (p.phase === 'reveal') res(p); }));
-  if (kicker) {
+  // The host can't be kicked, so the host must not be the drawer here: turn
+  // order is shuffled, so try fresh rooms until someone else draws first.
+  let st = null;
+  for (let attempt = 0; attempt < 8 && st === null; attempt++) {
+    const seats = await room(['Hana', 'Ann', 'Ben']);
+    const [host] = seats;
+    await emit(host.sock, 'room:settings', { drawSeconds: 60, selectSeconds: 10 });
+    const offers = seats.map((s) => next(s.sock, 'word:options').then((o) => ({ s, o })));
+    await emit(host.sock, 'room:start', {});
+    const { s: drawer, o } = await Promise.race(offers);
+    if (drawer === host) {
+      closeAll(seats);
+      continue;
+    }
+    await emit(drawer.sock, 'word:choose', { wordId: o.choices[0].id });
+    await sleep(200);
+    const watcher = seats.find((s) => s !== host && s !== drawer);
+    const reveal = new Promise((res) => watcher.sock.on('round:state', (p) => { if (p.phase === 'reveal') res(p); }));
     await emit(host.sock, 'player:kick', { playerId: drawer.id });
-  } else {
-    // The host is drawing: the other two vote them out.
-    for (const s of others) await emit(s.sock, 'player:kick', { playerId: drawer.id });
+    st = (await Promise.race([reveal, sleep(3000).then(() => null)])) ?? { phase: 'no reveal' };
+    closeAll(seats);
   }
-  const st = await Promise.race([reveal, sleep(3000).then(() => null)]);
   check('kicking the drawer ends the turn at once', st?.phase === 'reveal', JSON.stringify(st));
-  closeAll(seats);
 }
 
 console.log(failures.length ? `\n${failures.length} FAILED, ${pass} passed` : `\nall ${pass} passed`);

@@ -180,3 +180,4 @@ sockets, 400-join burst). Raise them for bigger events with
 | `pnpm smoke:guess` | guessing & scoring (13 cases) |
 | `pnpm smoke:spelling` | spaces, capitals and punctuation in a guess don't count; a near miss is still "close" (27 cases) |
 | `pnpm smoke:summary` | end-of-game summary: a whole game, re-sends to late arrivals, play again, kicks, the final scoreboard (63 cases, ~30 s) |
+| `pnpm smoke:teams` | team games: teams in the lobby, whose turn it is, who guesses and who is told the word, scoring, leaving and arriving mid-game, the results, an old snapshot restored; a room of 30; what changed for everyone-for-themselves rooms (145 cases, ~45 s) |

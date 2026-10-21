@@ -1,6 +1,7 @@
-import { shardOf } from '../contract/index.js';
+import { DEFAULT_SETTINGS, shardOf } from '../contract/index.js';
 import { sqlite, stmt } from '../db/index.js';
 import { SHARD, SHARDS } from '../shard.js';
+import { freshTeams } from './store.js';
 import { newGameId } from './summary.js';
 import type { Room } from './types.js';
 
@@ -103,7 +104,26 @@ export function loadRooms(now = Date.now()): { room: Room; downtimeMs: number }[
       const single = room as Room & { bestTurn?: Room['bestTurns'][number] | null };
       room.bestTurns ??= single.bestTurn ? [single.bestTurn] : [];
       delete single.bestTurn;
+      // Snapshots from before team games (contract 15) come back as games of
+      // everyone for themselves with every new field set: a missing teamId
+      // reaches a client as undefined, which is not null.
+      room.settings.mode ??= 'classic';
+      room.settings.teamCount ??= DEFAULT_SETTINGS.teamCount;
+      room.round.teamId ??= null;
+      room.teams ??= freshTeams();
+      room.teamGames ??= 0;
+      room.teamStart ??= 0;
+      room.teamQuota ??= 0;
+      // ...and from before the rounds could follow the room: as the host left them.
+      room.autoRounds ??= false;
+      for (const t of room.tally.values()) t.teamId ??= null;
+      if (room.summary) {
+        room.summary.mode ??= 'classic';
+        room.summary.teams ??= null;
+      }
       for (const p of room.players.values()) {
+        p.teamId ??= null;
+        p.lastTeamId ??= null;
         p.connected = false;
         p.socketId = null;
         p.lastSeen = now;

@@ -12,9 +12,9 @@ import {
   normalizeWord,
 } from '../contract/index.js';
 import { clearStrokes } from './drawing.js';
-import { StoreError, store } from './store.js';
+import { StoreError, canPlay, gameTeams, store, takeDrawer, teamQuota } from './store.js';
 import { buildSummary, recordGuess, recordTurn, resetSummary, tallyOf } from './summary.js';
-import type { PlayerRecord, Room } from './types.js';
+import type { PlayerRecord, Room, TeamState } from './types.js';
 import {
   acceptCustomWord,
   customIndex,
@@ -53,6 +53,14 @@ const HINTS_FROM = 0.35;
 const HINTS_UNTIL = 0.85;
 /** How long a departed player has to come back before the room acts on it. */
 const DEPARTURE_GRACE_MS = 10_000;
+/**
+ * Each 👍/👎 gets a line in the chat in rooms up to this size. In a bigger
+ * room the lines bury the guesses (and the floating feed over the canvas
+ * already names each voter); team games always go without.
+ */
+const REACTION_LINES_UP_TO = 12;
+
+type TurnEnd = 'time' | 'all-guessed' | 'drawer-left' | 'team-guessed' | 'no-guessers';
 
 /**
  * Owns phase transitions and every timer. All timing is server-side: clients
@@ -117,6 +125,12 @@ export class RoundEngine {
     this.io.to(room.code).emit('room:players', { players: store.publicPlayers(room) });
   }
 
+  /** Team names and scores; a team game's only (membership rides room:players). */
+  private sendTeams(room: Room): void {
+    if (room.settings.mode !== 'teams') return;
+    this.io.to(room.code).emit('room:teams', { teams: store.publicTeams(room) });
+  }
+
   private system(room: Room, text: string, tone: ChatTone = 'neutral'): void {
     this.io.to(room.code).emit('chat:message', {
       id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -137,8 +151,10 @@ export class RoundEngine {
 
   startGame(room: Room): void {
     this.advance(room);
-    // Shuffled: join order meant the host always drew first, every game.
-    room.drawOrder = shuffle(room.order.filter((id) => room.players.get(id)?.connected));
+    const teams = room.settings.mode === 'teams';
+    // Shuffled: join order meant the host always drew first, every game. A
+    // team game draws from each team's rotation instead.
+    room.drawOrder = teams ? [] : shuffle(room.order.filter((id) => room.players.get(id)?.connected));
     room.turnIndex = 0;
     room.usedWordIds = [];
     room.usedCustom = new Set();
@@ -159,13 +175,64 @@ export class RoundEngine {
       dislikes: 0,
     };
     for (const p of room.players.values()) p.score = 0;
+    if (teams) {
+      for (const p of room.players.values()) store.ensureTeam(room, p);
+      // A team yet to draw starts from a random member. Teams set up before
+      // anyone arrived were dealt in join order, the host first: the host
+      // drew the room's first turn, every time. A team that has drawn carries
+      // on where its rotation left off.
+      for (const t of gameTeams(room)) if (t.drawn.size === 0) t.rotation = shuffle(t.rotation);
+      for (const t of room.teams) t.score = 0;
+      // Each game in the room starts with the next team.
+      room.teamStart = room.teamGames % gameTeams(room).length;
+      room.teamGames++;
+      room.teamQuota = teamQuota(room);
+    }
     this.sendPlayers(room);
+    this.sendTeams(room);
     this.beginSelection(room);
   }
 
   private currentDrawer(room: Room): PlayerRecord | null {
     const id = room.drawOrder[room.turnIndex];
     return id ? (room.players.get(id) ?? null) : null;
+  }
+
+  /**
+   * A team game's turn: the team whose turn it is, and who draws for it. The
+   * teams take turns in one continuous cycle; a team that can't play (nobody
+   * there to guess) loses its turn, and everyone is told. Null when every
+   * turn left in the round went that way.
+   */
+  private nextTeamTurn(room: Room): { team: TeamState; drawer: PlayerRecord } | null {
+    const teams = gameTeams(room);
+    // One line per team, however many of its turns go by in one go.
+    const told = new Set<string>();
+    for (; room.turnIndex < room.teamQuota * teams.length; room.turnIndex++) {
+      const team = teams[(room.teamStart + room.turnIndex) % teams.length]!;
+      const drawer = canPlay(room, team) ? takeDrawer(room, team) : null;
+      if (drawer) return { team, drawer };
+      if (!told.has(team.id)) this.system(room, `${team.name}'s turn is skipped: nobody there to guess`);
+      told.add(team.id);
+    }
+    return null;
+  }
+
+  /** Turns left in the game, this one included: paces the host's custom words. */
+  private turnsLeft(room: Room): number {
+    const roundsAfter = Math.max(0, room.settings.rounds - room.round.round);
+    const perRound =
+      room.settings.mode === 'teams' ? room.teamQuota * gameTeams(room).length : room.drawOrder.length;
+    return perRound - room.turnIndex + perRound * roundsAfter;
+  }
+
+  /** Writing your own word: never in a team game, where only your team could get it. */
+  private mayWriteOwn(room: Room, drawer: PlayerRecord): boolean {
+    return (
+      room.settings.mode !== 'teams' &&
+      room.settings.allowCustomWords &&
+      (room.customCounts[drawer.id] ?? 0) < MAX_CUSTOM_PER_GAME
+    );
   }
 
   private beginSelection(room: Room): void {
@@ -178,11 +245,22 @@ export class RoundEngine {
     room.reactions.clear();
     this.io.to(room.code).emit('draw:clear', {});
 
-    const drawer = this.currentDrawer(room);
-    if (!drawer || !drawer.connected) {
-      // Nobody home for this slot — skip rather than stall the room.
-      this.nextTurn(room);
-      return;
+    let team: TeamState | null = null;
+    let drawer: PlayerRecord | null;
+    if (room.settings.mode === 'teams') {
+      const turn = this.nextTeamTurn(room);
+      if (!turn) {
+        this.endRound(room);
+        return;
+      }
+      ({ team, drawer } = turn);
+    } else {
+      drawer = this.currentDrawer(room);
+      if (!drawer || !drawer.connected) {
+        // Nobody home for this slot — skip rather than stall the room.
+        this.nextTurn(room);
+        return;
+      }
     }
 
     room.turnNo++;
@@ -196,9 +274,7 @@ export class RoundEngine {
       drawn: room.drawn,
       customOffered: room.customOffered,
       turn: room.turnNo,
-      turnsLeft:
-        room.drawOrder.length - room.turnIndex +
-        room.drawOrder.length * Math.max(0, room.settings.rounds - room.round.round),
+      turnsLeft: this.turnsLeft(room),
       customOnly: room.settings.customWordsOnly,
     });
     if (!choices.length) {
@@ -218,28 +294,32 @@ export class RoundEngine {
       solution: null,
       endsAt,
       guessedPlayerIds: [],
+      teamId: team?.id ?? null,
       likes: 0,
       dislikes: 0,
     };
     this.publish(room);
-    this.system(room, `${drawer.name} is choosing a word…`);
+    this.system(
+      room,
+      team ? `${team.name} is up: ${drawer.name} is choosing a word…` : `${drawer.name} is choosing a word…`,
+    );
 
-    this.socketOf(drawer)?.emit('word:options', {
-      choices,
-      allowCustom:
-        room.settings.allowCustomWords &&
-        (room.customCounts[drawer.id] ?? 0) < MAX_CUSTOM_PER_GAME,
-    });
+    this.socketOf(drawer)?.emit('word:options', { choices, allowCustom: this.mayWriteOwn(room, drawer) });
 
     // One stalled drawer must not freeze the room.
     this.later(room, room.settings.selectSeconds * 1000, () => this.autoPick(room));
+  }
+
+  /** This turn's drawer, once one has been picked. */
+  private drawerOf(room: Room): PlayerRecord | null {
+    return room.round.drawerId ? (room.players.get(room.round.drawerId) ?? null) : null;
   }
 
   /** The drawer ran out of time to choose: pick one of the offers for them. */
   private autoPick(room: Room): void {
     const pick = room.offered[Math.floor(Math.random() * room.offered.length)];
     if (!pick) return this.nextTurn(room);
-    const drawer = this.currentDrawer(room);
+    const drawer = this.drawerOf(room);
     this.system(room, `${drawer?.name ?? 'The drawer'} took too long — picked for them.`);
     this.beginDrawing(room, this.activeFrom(room, pick));
   }
@@ -271,6 +351,11 @@ export class RoundEngine {
   /** Requirement 1: the drawer writes their own instead of taking an offer. */
   custom(room: Room, player: PlayerRecord, text: string): void {
     this.assertSelecting(room, player);
+    // Only the drawer's own team could get an in-joke: a team game sticks to
+    // the offered words, whatever the setting.
+    if (room.settings.mode === 'teams') {
+      throw new StoreError('INVALID', 'In a team game the drawer picks one of the offered words');
+    }
     if (!room.settings.allowCustomWords) {
       throw new StoreError('INVALID', 'Custom words are off in this room');
     }
@@ -334,13 +419,16 @@ export class RoundEngine {
     };
     this.publish(room);
 
-    const drawer = this.currentDrawer(room);
+    const drawer = this.drawerOf(room);
     if (drawer) {
       // On the books from the start, so the turn still counts for the summary
       // if their seat is gone before it ends.
       tallyOf(room, drawer);
       this.socketOf(drawer)?.emit('word:assigned', { text: active.text });
     }
+    // The other teams watch knowing the word: half the fun is seeing how far
+    // off the guesses are. Never the drawing team's own guessers.
+    for (const p of this.watchers(room)) this.socketOf(p)?.emit('word:assigned', { text: active.text });
 
     this.scheduleHints(room, active.text, ms);
     this.later(room, ms, () => this.endTurn(room, 'time'));
@@ -427,7 +515,7 @@ export class RoundEngine {
         break;
       case 'scoreboard':
         this.later(room, left, () =>
-          room.finalScoreboard ? this.finish(room) : this.beginSelection(room),
+          room.finalScoreboard ? this.finish(room) : this.nextRound(room),
         );
         break;
       case 'finished':
@@ -468,6 +556,8 @@ export class RoundEngine {
       likes,
       dislikes,
     });
+    const present = [...room.players.values()].filter((p) => p.connected).length;
+    if (room.settings.mode === 'teams' || present > REACTION_LINES_UP_TO) return;
     this.system(
       room,
       `${player.name} ${reaction === 'up' ? 'liked' : 'disliked'} the drawing`,
@@ -489,6 +579,21 @@ export class RoundEngine {
 
     const active = room.active;
     const live = room.round.phase === 'drawing' && active !== null;
+
+    // In a team game the teams that are not up know the word: what they type
+    // while a team is up is talk among themselves, never a guess, and never
+    // reaches the drawing team. It waits until there is a word to talk about.
+    if (this.isWatcher(room, player) && (live || room.round.phase === 'selecting')) {
+      if (live) {
+        this.sendToWatchers(room, this.chat('watchers', player, text));
+      } else {
+        this.socketOf(player)?.emit('error:toast', {
+          code: 'BAD_PHASE',
+          message: 'You can chat once they start drawing',
+        });
+      }
+      return;
+    }
 
     // Outside a live round chat is just chat.
     if (!live) {
@@ -515,12 +620,20 @@ export class RoundEngine {
     // Spaces count no more than capitals or punctuation: "icecream" is a
     // right answer to "Ice Cream", not a near miss.
     if (guessKey(text) === guessKey(active!.text)) {
-      this.award(room, player);
+      if (room.settings.mode === 'teams') this.teamAward(room, player);
+      else this.award(room, player);
       return;
     }
 
     if (isCloseGuess(text, active!.text)) {
-      this.socketOf(player)?.emit('chat:close', { text: `"${text}" is close!` });
+      if (room.settings.mode === 'teams') {
+        // Teammates work it out together: a near miss is a clue for all of
+        // them, the drawer included.
+        const note = `${player.name}'s “${text}” is close!`;
+        for (const p of this.drawingTeam(room)) this.socketOf(p)?.emit('chat:close', { text: note });
+      } else {
+        this.socketOf(player)?.emit('chat:close', { text: `"${text}" is close!` });
+      }
     }
     this.broadcastChat(room, this.chat('guess', player, text, 'wrong'));
   }
@@ -575,6 +688,39 @@ export class RoundEngine {
     if (pending.length === 0) this.endTurn(room, 'all-guessed');
   }
 
+  /**
+   * A right answer in a team game wins the turn there and then. The guesser,
+   * the drawer and the team each get what a first guess is worth: the same
+   * points in a room of 4 or 30, as only the drawing team guesses.
+   */
+  private teamAward(room: Room, player: PlayerRecord): void {
+    const total = room.settings.drawSeconds * 1000;
+    const left = Math.max(0, (room.round.endsAt ?? 0) - Date.now());
+    const frac = total > 0 ? Math.min(1, left / total) : 0;
+    const points = guessPoints(frac, 0);
+
+    const team = room.teams.find((t) => t.id === room.round.teamId);
+    const drawer = this.drawerOf(room);
+    player.score += points;
+    if (drawer) drawer.score += points;
+    if (team) team.score += points;
+    room.round = {
+      ...room.round,
+      guessedPlayerIds: [...room.round.guessedPlayerIds, player.id],
+    };
+
+    recordGuess(room, player, 0, total - left);
+    if (drawer) tallyOf(room, drawer);
+    if (room.active?.custom) markSuggestionGuessed(room.active.normalized);
+    else markGuessed(room.active?.wordId ?? null);
+
+    // "guessed it": the clients' sound for someone getting it keys on it.
+    this.system(room, `${player.name} guessed it for ${team?.name ?? 'their team'}!`, 'correct');
+    // The scores first: the reveal shows what the turn won.
+    this.sendTeams(room);
+    this.endTurn(room, 'team-guessed');
+  }
+
   private chat(
     channel: ChatMessage['channel'],
     player: PlayerRecord,
@@ -609,6 +755,31 @@ export class RoundEngine {
     }
   }
 
+  /** In a team game, someone on a team that is not up this turn. */
+  private isWatcher(room: Room, player: PlayerRecord): boolean {
+    return room.settings.mode === 'teams' && room.round.teamId !== null && player.teamId !== room.round.teamId;
+  }
+
+  /** Everyone here on a team that is not up: they know the word. */
+  private watchers(room: Room): PlayerRecord[] {
+    return [...room.players.values()].filter((p) => p.connected && this.isWatcher(room, p));
+  }
+
+  /** Everyone here on the team that is up, the drawer included. */
+  private drawingTeam(room: Room): PlayerRecord[] {
+    const { teamId } = room.round;
+    return teamId ? [...room.players.values()].filter((p) => p.connected && p.teamId === teamId) : [];
+  }
+
+  /**
+   * The watchers' chat, to each of them on their own socket, the sender
+   * included (a client shows only what comes back): a room-wide broadcast
+   * would reach the drawing team.
+   */
+  private sendToWatchers(room: Room, m: ChatMessage): void {
+    for (const p of this.watchers(room)) this.socketOf(p)?.emit('chat:message', m);
+  }
+
   /**
    * Re-send whatever the round had already pushed to this player privately.
    * `room:state` carries the public view, so a reconnecting drawer gets the
@@ -619,9 +790,11 @@ export class RoundEngine {
   resendTurnContext(room: Room, player: PlayerRecord): void {
     const socket = this.socketOf(player);
     if (!socket) return;
-    // A guesser who already solved this turn gets the word back too.
+    // A guesser who already solved this turn gets the word back too, and so
+    // does anyone watching another team draw.
     if (room.round.drawerId !== player.id) {
-      if (room.round.phase === 'drawing' && room.active && room.round.guessedPlayerIds.includes(player.id)) {
+      const knows = room.round.guessedPlayerIds.includes(player.id) || this.isWatcher(room, player);
+      if (room.round.phase === 'drawing' && room.active && knows) {
         socket.emit('word:assigned', { text: room.active.text });
       }
       return;
@@ -630,12 +803,7 @@ export class RoundEngine {
     if (room.round.phase === 'drawing' && room.active) {
       socket.emit('word:assigned', { text: room.active.text });
     } else if (room.round.phase === 'selecting' && room.offered.length) {
-      socket.emit('word:options', {
-        choices: room.offered,
-        allowCustom:
-          room.settings.allowCustomWords &&
-          (room.customCounts[player.id] ?? 0) < MAX_CUSTOM_PER_GAME,
-      });
+      socket.emit('word:options', { choices: room.offered, allowCustom: this.mayWriteOwn(room, player) });
     }
   }
 
@@ -670,6 +838,10 @@ export class RoundEngine {
   private reevaluate(room: Room): void {
     const phase = room.round.phase;
     if (phase === 'lobby' || phase === 'finished') return;
+    if (room.settings.mode === 'teams') {
+      this.reevaluateTeams(room);
+      return;
+    }
 
     const connected = [...room.players.values()].filter((p) => p.connected);
     if (connected.length < 2) {
@@ -713,8 +885,42 @@ export class RoundEngine {
     );
   }
 
-  /** Called by the timer, by the guess handler when everyone is done, or on drawer exit. */
-  endTurn(room: Room, reason: 'time' | 'all-guessed' | 'drawer-left'): void {
+  /**
+   * reevaluate, by the team rules. A team plays with two of its players here,
+   * one to draw and one to guess: with fewer than two teams like that the
+   * game is over. Mid-turn, the turn ends when its drawer or its last guesser
+   * has gone.
+   */
+  private reevaluateTeams(room: Room): void {
+    const phase = room.round.phase;
+    if (gameTeams(room).filter((t) => canPlay(room, t)).length < 2) {
+      // As in reevaluate: the closing screens play out, the game complete.
+      if (this.noTeamTurnsLeft(room)) return;
+      this.system(room, 'Not enough players left for two teams, so the game is over.');
+      this.finish(room, 'abandoned');
+      return;
+    }
+    if (phase !== 'selecting' && phase !== 'drawing') return;
+    const drawer = this.drawerOf(room);
+    if (!drawer?.connected) {
+      this.endTurn(room, 'drawer-left');
+      return;
+    }
+    if (!this.drawingTeam(room).some((p) => p.id !== drawer.id)) this.endTurn(room, 'no-guessers');
+  }
+
+  /** noTurnsLeft for a team game, whose rounds are a set number of turns. */
+  private noTeamTurnsLeft(room: Room): boolean {
+    if (room.round.phase === 'scoreboard') return room.finalScoreboard;
+    return (
+      room.round.phase === 'reveal' &&
+      room.round.round >= room.settings.rounds &&
+      room.turnIndex + 1 >= room.teamQuota * gameTeams(room).length
+    );
+  }
+
+  /** Called by the timer, by the guess handler when the turn is won, or on drawer exit. */
+  endTurn(room: Room, reason: TurnEnd): void {
     if (room.round.phase !== 'drawing' && room.round.phase !== 'selecting') return;
     this.advance(room);
     recordTurn(room);
@@ -727,10 +933,11 @@ export class RoundEngine {
     };
     this.publish(room);
     this.sendPlayers(room);
-    const guessers = [...room.players.values()].filter(
-      (p) => p.connected && p.id !== room.round.drawerId,
-    ).length;
-    if (solution) {
+    const team = room.teams.find((t) => t.id === room.round.teamId);
+    if (team) {
+      const line = this.teamTurnLine(team, reason, solution);
+      if (line) this.system(room, line);
+    } else if (solution) {
       const why =
         reason === 'all-guessed' ? 'Everyone got it!'
         : reason === 'drawer-left' ? 'The drawer left.'
@@ -738,6 +945,18 @@ export class RoundEngine {
       this.system(room, `${why} The word was "${solution}".`);
     }
     this.later(room, REVEAL_MS, () => this.nextTurn(room));
+  }
+
+  /** How a team's turn ended, for the chat; nothing for a turn that never got a word. */
+  private teamTurnLine(team: TeamState, reason: TurnEnd, solution: string | null): string | null {
+    if (reason === 'no-guessers') {
+      const gone = `Nobody on ${team.name} is left to guess.`;
+      return solution ? `${gone} The word was “${solution}”.` : gone;
+    }
+    if (!solution) return null;
+    if (reason === 'team-guessed') return `${team.name} got it! The word was “${solution}”.`;
+    if (reason === 'drawer-left') return `The drawer left. The word was “${solution}”.`;
+    return `Time's up! Nobody on ${team.name} got “${solution}”.`;
   }
 
   /**
@@ -767,21 +986,41 @@ export class RoundEngine {
 
   private nextTurn(room: Room): void {
     this.advance(room);
+    if (room.settings.mode === 'teams') {
+      // Newcomers are already at the back of their team's rotation.
+      room.turnIndex++;
+      if (room.turnIndex < room.teamQuota * gameTeams(room).length) this.beginSelection(room);
+      else this.endRound(room);
+      return;
+    }
     this.admitNewcomers(room);
     room.turnIndex++;
     if (room.turnIndex < room.drawOrder.length) {
       this.beginSelection(room);
       return;
     }
-    // Everyone has drawn once: that is one round.
+    this.endRound(room);
+  }
+
+  /** Everyone has drawn once: that is one round. */
+  private endRound(room: Room): void {
     room.turnIndex = 0;
-    this.rebuildDrawOrder(room);
+    if (room.settings.mode !== 'teams') this.rebuildDrawOrder(room);
     if (room.round.round >= room.settings.rounds) {
       this.showScoreboard(room, true);
       return;
     }
     room.round = { ...room.round, round: room.round.round + 1 };
     this.showScoreboard(room, false);
+  }
+
+  /**
+   * On from a scoreboard between rounds. A team game sizes the new round by
+   * the teams as they are now: whoever has joined or left since counts.
+   */
+  private nextRound(room: Room): void {
+    if (room.settings.mode === 'teams') room.teamQuota = teamQuota(room);
+    this.beginSelection(room);
   }
 
   private showScoreboard(room: Room, final: boolean): void {
@@ -792,6 +1031,7 @@ export class RoundEngine {
       phase: 'scoreboard',
       endsAt: Date.now() + SCOREBOARD_MS,
       solution: null,
+      teamId: null,
     };
     this.publish(room);
     this.io.to(room.code).emit('game:scores', {
@@ -801,7 +1041,7 @@ export class RoundEngine {
     if (final) {
       this.later(room, SCOREBOARD_MS, () => this.finish(room));
     } else {
-      this.later(room, SCOREBOARD_MS, () => this.beginSelection(room));
+      this.later(room, SCOREBOARD_MS, () => this.nextRound(room));
     }
   }
 
@@ -821,6 +1061,7 @@ export class RoundEngine {
       drawerId: null,
       maskedWord: null,
       endsAt: null,
+      teamId: null,
     };
     room.active = null;
     room.summary = buildSummary(room, rounds, reason === 'abandoned');
@@ -849,6 +1090,7 @@ export class RoundEngine {
       solution: null,
       endsAt: null,
       guessedPlayerIds: [],
+      teamId: null,
       likes: 0,
       dislikes: 0,
     };
@@ -859,8 +1101,10 @@ export class RoundEngine {
     clearStrokes(room);
     resetSummary(room);
     for (const p of room.players.values()) p.score = 0;
+    for (const t of room.teams) t.score = 0;
     this.publish(room);
     this.sendPlayers(room);
+    this.sendTeams(room);
     this.io.to(room.code).emit('draw:clear', {});
   }
 
