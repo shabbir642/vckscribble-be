@@ -59,7 +59,7 @@ sys.exit(0 if any(ip in ipaddress.ip_network(r) for r in sys.argv[2:]) else 1)
 EOF
 }
 
-direct=" $({ grep -E '^(GAME_HOST|EXTRA_GAME_HOSTS)=' .env || true; } | cut -d= -f2- | tr -d ' "' | tr ',' ' ') "
+direct=" $({ grep -E '^(GAME_HOST|EXTRA_GAME_HOSTS)=' .env || true; } | cut -d= -f2- | tr -d ' "' | tr ',\n' '  ') "
 names=$(sed -n 's/^DOMAIN=//p' .env | tr -d ' "' | tr ',' ' ')
 ready=1
 for name in $names; do
