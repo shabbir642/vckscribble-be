@@ -1,6 +1,7 @@
 import { shardOf } from '../contract/index.js';
 import { sqlite, stmt } from '../db/index.js';
 import { SHARD, SHARDS } from '../shard.js';
+import { newGameId } from './summary.js';
 import type { Room } from './types.js';
 
 /**
@@ -94,6 +95,14 @@ export function loadRooms(now = Date.now()): { room: Room; downtimeMs: number }[
       // Snapshots from before custom words were paced.
       room.customOffered ??= new Map();
       room.turnNo ??= 0;
+      // Snapshots from before the end-of-game summary.
+      room.gameId ??= newGameId();
+      room.tally ??= new Map();
+      room.summary ??= null;
+      // ...and from when it kept a single best drawing.
+      const single = room as Room & { bestTurn?: Room['bestTurns'][number] | null };
+      room.bestTurns ??= single.bestTurn ? [single.bestTurn] : [];
+      delete single.bestTurn;
       for (const p of room.players.values()) {
         p.connected = false;
         p.socketId = null;

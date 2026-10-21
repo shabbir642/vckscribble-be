@@ -1,5 +1,7 @@
 import type {
+  BestDrawing,
   Drawability,
+  GameSummary,
   Player,
   RoomSettings,
   RoundState,
@@ -21,6 +23,27 @@ export interface ActiveWord {
   text: string;
   normalized: string;
   custom: boolean;
+}
+
+/**
+ * What one player has done this game, booked as it happens (see summary.ts):
+ * by the end their seat may be gone and the round state has moved on.
+ */
+export interface Tally {
+  /** As last seen: the seat can be kicked before the game ends. */
+  name: string;
+  avatar: number;
+  /** Last known, for the same reason. */
+  score: number;
+  guessed: number;
+  firstGuesses: number;
+  /** Quickest right guess, in ms after the drawing started. */
+  fastestMs: number | null;
+  drew: number;
+  /** Right guesses on their drawings, all their turns together. */
+  solvedByOthers: number;
+  /** 👍 on their drawings, all their turns together. */
+  likes: number;
 }
 
 export interface Room {
@@ -86,4 +109,18 @@ export interface Room {
   kickVotes: Map<string, Set<string>>;
   /** Device ids (and tokens) of kicked players, refused at the door. */
   banned: Set<string>;
+
+  /* --- end-of-game summary (summary.ts) --- */
+  /** Fresh for every game: the summary's id, the same in every re-send. */
+  gameId: string;
+  /** player id -> what they did this game; kept for players who have left. */
+  tally: Map<string, Tally>;
+  /**
+   * The best drawings so far this game, best first, each with the score it
+   * won on: a few, from different drawers, so kicking one drawer still leaves
+   * a drawing of the game (see recordTurn).
+   */
+  bestTurns: { drawing: BestDrawing; score: number }[];
+  /** The finished game's summary, kept to re-send; null while a game runs. */
+  summary: GameSummary | null;
 }

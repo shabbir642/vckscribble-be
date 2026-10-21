@@ -1,7 +1,7 @@
 import { chmodSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
-import { Server } from 'socket.io';
+import { Server, type ServerOptions } from 'socket.io';
 import type * as UWS from 'uWebSockets.js';
 import type {
   ClientToServerEvents,
@@ -203,8 +203,20 @@ export const io = new Server<ClientToServerEvents, ServerToClientEvents>({
   // The client is bundled with the frontend; nothing should fetch it here.
   serveClient: false,
 });
+/**
+ * How much a slow socket may have queued before uWS starts skipping messages
+ * to it, silently (its default is 64 KB). A finished game's summary carries a
+ * drawing of a few hundred KB, and the messages right behind it must still
+ * arrive.
+ */
+const MAX_BACKPRESSURE = 1 << 20;
+// socket.io's type for these options leaves out engine.io's uWS ones, but it
+// hands the whole object to the engine, which passes this one on to uWS.
+const uwsOptions: Partial<ServerOptions> & { maxBackpressure: number } = {
+  maxBackpressure: MAX_BACKPRESSURE,
+};
 // Rooms become uWS pub/sub topics: a broadcast to a room is one C++ publish.
-io.attachApp(app);
+io.attachApp(app, uwsOptions);
 
 /**
  * Behind the reverse proxy every socket comes from the proxy's address; the
@@ -321,7 +333,7 @@ if (TLS) {
     }
     app.addServerName(name, certFiles(TLS.dir, name));
     (io.engine as unknown as { attach(app: UWS.TemplatedApp, o: object): void })
-      .attach(app.domain(name), { path: io.path() });
+      .attach(app.domain(name), { path: io.path(), maxBackpressure: MAX_BACKPRESSURE });
   }
 }
 

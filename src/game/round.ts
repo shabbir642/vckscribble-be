@@ -12,6 +12,7 @@ import {
 } from '../contract/index.js';
 import { clearStrokes } from './drawing.js';
 import { StoreError, store } from './store.js';
+import { buildSummary, recordGuess, recordTurn, resetSummary, tallyOf } from './summary.js';
 import type { PlayerRecord, Room } from './types.js';
 import {
   acceptCustomWord,
@@ -144,6 +145,9 @@ export class RoundEngine {
     room.turnNo = 0;
     room.drawn = new Set();
     room.customCounts = {};
+    room.finalScoreboard = false;
+    // Here as well as in reset: play again comes straight from the podium.
+    resetSummary(room);
     room.round = {
       ...room.round,
       phase: 'selecting',
@@ -330,7 +334,12 @@ export class RoundEngine {
     this.publish(room);
 
     const drawer = this.currentDrawer(room);
-    if (drawer) this.socketOf(drawer)?.emit('word:assigned', { text: active.text });
+    if (drawer) {
+      // On the books from the start, so the turn still counts for the summary
+      // if their seat is gone before it ends.
+      tallyOf(room, drawer);
+      this.socketOf(drawer)?.emit('word:assigned', { text: active.text });
+    }
 
     this.scheduleHints(room, active.text, ms);
     this.later(room, ms, () => this.endTurn(room, 'time'));
@@ -420,8 +429,13 @@ export class RoundEngine {
           room.finalScoreboard ? this.finish(room) : this.beginSelection(room),
         );
         break;
+      case 'finished':
+        // No clock. The summary was saved with the room and is never rebuilt:
+        // a snapshot from before summaries existed has empty tallies. Nobody
+        // is connected this early; each player gets it as they resume.
+        break;
       default:
-        break; // lobby and finished have no clock
+        break; // the lobby has no clock
     }
   }
 
@@ -531,6 +545,11 @@ export class RoundEngine {
       drawer.score += earned;
       room.drawerEarned += earned;
     }
+
+    // For the summary. Time into the drawing rather than a timestamp: endsAt
+    // moves with a restart's downtime, so this survives one.
+    recordGuess(room, player, place, total - left);
+    if (drawer) tallyOf(room, drawer);
 
     // Stats feed the retirement query — see PLAN.md §7a.
     if (room.active?.custom) markSuggestionGuessed(room.active.normalized);
@@ -651,6 +670,9 @@ export class RoundEngine {
 
     const connected = [...room.players.values()].filter((p) => p.connected);
     if (connected.length < 2) {
+      // Every turn has been played: the game ends on schedule, complete,
+      // rather than being called off during its closing screens.
+      if (this.noTurnsLeft(room)) return;
       this.system(room, 'Not enough players left — ending the game.');
       this.finish(room, 'abandoned');
       return;
@@ -672,10 +694,27 @@ export class RoundEngine {
     }
   }
 
+  /**
+   * Only the closing screens are left: the final scoreboard, or the reveal of
+   * the last round's last turn. A slot still to come is a turn left unless its
+   * seat is gone (a kicked player's is skipped), and so is a newcomer waiting
+   * to be added to the queue.
+   */
+  private noTurnsLeft(room: Room): boolean {
+    if (room.round.phase === 'scoreboard') return room.finalScoreboard;
+    return (
+      room.round.phase === 'reveal' &&
+      room.round.round >= room.settings.rounds &&
+      room.drawOrder.slice(room.turnIndex + 1).every((id) => !room.players.has(id)) &&
+      room.order.every((id) => room.drawOrder.includes(id))
+    );
+  }
+
   /** Called by the timer, by the guess handler when everyone is done, or on drawer exit. */
   endTurn(room: Room, reason: 'time' | 'all-guessed' | 'drawer-left'): void {
     if (room.round.phase !== 'drawing' && room.round.phase !== 'selecting') return;
     this.advance(room);
+    recordTurn(room);
     const solution = room.active?.text ?? null;
     room.round = {
       ...room.round,
@@ -765,6 +804,14 @@ export class RoundEngine {
 
   private finish(room: Room, reason: 'completed' | 'abandoned' = 'completed'): void {
     this.advance(room);
+    // A game cut short mid-turn keeps its last drawing. Only then: from the
+    // reveal or a scoreboard, `active` is a turn endTurn has already booked.
+    if (room.round.phase === 'drawing' && room.active) recordTurn(room);
+    // A scoreboard between rounds has already counted in a round nobody drew.
+    const rounds =
+      room.round.phase === 'scoreboard' && !room.finalScoreboard
+        ? room.round.round - 1
+        : room.round.round;
     room.round = {
       ...room.round,
       phase: 'finished',
@@ -773,6 +820,10 @@ export class RoundEngine {
       endsAt: null,
     };
     room.active = null;
+    room.summary = buildSummary(room, rounds, reason === 'abandoned');
+    // Ahead of the phase change: clients open the results screen on it, and
+    // the summary should already be there.
+    this.io.to(room.code).emit('game:summary', room.summary);
     this.publish(room);
     this.io.to(room.code).emit('game:scores', {
       players: store.publicPlayers(room),
@@ -801,7 +852,9 @@ export class RoundEngine {
     room.active = null;
     room.offered = [];
     room.revealed = [];
+    room.finalScoreboard = false;
     clearStrokes(room);
+    resetSummary(room);
     for (const p of room.players.values()) p.score = 0;
     this.publish(room);
     this.sendPlayers(room);

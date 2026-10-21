@@ -11,6 +11,7 @@ import {
 } from '../contract/index.js';
 import { playerId as newPlayerId, roomCode, token as newToken } from './codes.js';
 import { SHARD, SHARDS } from '../shard.js';
+import { newGameId } from './summary.js';
 import type { PlayerRecord, Room } from './types.js';
 
 export class StoreError extends Error {
@@ -121,6 +122,10 @@ export class RoomStore {
       finalScoreboard: false,
       kickVotes: new Map(),
       banned: new Set(),
+      gameId: newGameId(),
+      tally: new Map(),
+      bestTurns: [],
+      summary: null,
     };
     this.rooms.set(code, room);
     const player = this.addPlayer(room, name, avatar, socketId, deviceId);

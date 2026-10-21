@@ -168,6 +168,21 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       ...(player.id === room.hostId ? { hostWords: room.customWords } : {}),
     });
   };
+  /**
+   * A finished game's results stay up until the host moves on, but its final
+   * scores and summary went out once, when it ended. Anyone arriving since (a
+   * refresh, a late invite) gets them straight after the room state, so the
+   * results screen has them when it opens. The same goes for the final
+   * scoreboard: its round state looks like any other scoreboard's, and only
+   * these scores say it is the last.
+   */
+  const sendResults = (room: Room) => {
+    const { phase } = room.round;
+    if (phase !== 'finished' && !(phase === 'scoreboard' && room.finalScoreboard)) return;
+    socket.emit('game:scores', { players: store.publicPlayers(room), final: true });
+    // Only once the game has finished: it is built then.
+    if (room.summary) socket.emit('game:summary', room.summary);
+  };
   const broadcastPlayers = (room: Room) => {
     io.to(room.code).emit('room:players', { players: store.publicPlayers(room) });
   };
@@ -226,6 +241,7 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       void socket.join(room.code);
       ack({ ok: true, token: player.token });
       sendState(room, player);
+      sendResults(room);
       broadcastPlayers(room);
       if (room.strokes.length) socket.emit('draw:sync', { strokes: room.strokes });
       io.to(room.code).emit('chat:message', systemMessage(`${name} joined`));
@@ -316,6 +332,7 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
       void socket.join(room.code);
       ack({ ok: true, playerId: player.id });
       sendState(room, player);
+      sendResults(room);
       broadcastPlayers(room);
       // Always the authoritative drawing, even when it is empty: whatever the
       // client drew while offline was never seen here, and a canvas cleared

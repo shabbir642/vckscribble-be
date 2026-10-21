@@ -8,7 +8,7 @@
  * Keep this file dependency-free so both repos can consume it as-is.
  */
 
-export const CONTRACT_VERSION = 14;
+export const CONTRACT_VERSION = 15;
 
 /* ---------------------------------------------------------------- domain */
 
@@ -386,10 +386,97 @@ export interface ServerToClientEvents {
   'chat:close': (p: { text: string }) => void;
 
   'game:scores': (p: { players: Player[]; final: boolean }) => void;
+  /**
+   * The game's highlights, once it is over: sent when it finishes, and again
+   * to anyone who joins or reconnects while it stays finished.
+   */
+  'game:summary': (p: GameSummary) => void;
   'error:toast': (p: { code: ErrorCode; message: string }) => void;
   /** You were removed from the room; your seat is gone. */
   'room:kicked': (p: { roomCode: string; by: 'host' | 'vote' }) => void;
 }
+
+/* ---------------------------------------------------------- game summary */
+
+/**
+ * Who did what in a finished game, the fun awards, and the drawing of the
+ * game: the results screen and the picture players share are built from it.
+ */
+export interface GameSummary {
+  /** Unique per game, and the same in every re-send of it. */
+  id: string;
+  /** Everyone who scored or drew, best first, including anyone who left. */
+  players: SummaryPlayer[];
+  awards: Award[];
+  /**
+   * The most liked drawing (then the most guessed), by a player still in the
+   * room; null if nothing was drawn, or nothing that qualifies (see the
+   * server's summary rules).
+   */
+  best: BestDrawing | null;
+  rounds: number;
+  /** Turns that were actually drawn. */
+  turns: number;
+  /** Ended early: too few players were left to carry on. */
+  abandoned: boolean;
+}
+
+export interface SummaryPlayer {
+  id: string;
+  /** As they were at the end of the game, or when they left. */
+  name: string;
+  avatar: number;
+  score: number;
+  /** 1 is the winner; equal scores share a rank. */
+  rank: number;
+  /** Words they guessed right. */
+  guessed: number;
+  /** Times they were the first to get it. */
+  firstGuesses: number;
+  /** Their quickest right guess, in ms after the drawing started. */
+  fastestMs: number | null;
+  /** Turns they drew. */
+  drew: number;
+  /** Right guesses on their drawings, all their turns together. */
+  solvedByOthers: number;
+  /** 👍 on their drawings, all their turns together. */
+  likes: number;
+  /** No longer in the room. */
+  left: boolean;
+}
+
+/**
+ * - artist: the most 👍 on their drawings
+ * - speedster: the quickest right guess of the game
+ * - sharpshooter: the most words guessed
+ * - trailblazer: first to guess, the most often
+ * - storyteller: the most right guesses on their drawings
+ */
+export type AwardId = 'artist' | 'speedster' | 'sharpshooter' | 'trailblazer' | 'storyteller';
+
+export interface Award {
+  id: AwardId;
+  playerId: string;
+  /** What won it: likes, ms, words, times or guesses, by award. */
+  value: number;
+}
+
+export interface BestDrawing {
+  drawerId: string;
+  drawerName: string;
+  drawerAvatar: number;
+  word: string;
+  likes: number;
+  dislikes: number;
+  /** How many guessed it, out of how many could have. */
+  solvers: number;
+  guessers: number;
+  /** The finished canvas, thinned to at most BEST_DRAWING_MAX_POINTS pairs. */
+  strokes: Stroke[];
+}
+
+/** Point pairs, all strokes together, in a GameSummary's best drawing. */
+export const BEST_DRAWING_MAX_POINTS = 20_000;
 
 /* --------------------------------------------------------------- results */
 
