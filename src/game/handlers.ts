@@ -658,7 +658,10 @@ export function registerHandlers(io: IO, socket: Sock, engine: RoundEngine): voi
   });
 
   socket.on('net:report', (payload) => {
-    if (!allow(socket.id, 'net:report')) return;
+    if (!allow(socket.id, 'net:report', ip)) return;
+    // Players only: reports are kept for weeks, and a seat costs a join
+    // (limited per network), where a bare connection costs nothing.
+    if (!store.seatOf(socket.id)) return;
     if (payload && typeof payload === 'object') recordNetReport(payload);
   });
 

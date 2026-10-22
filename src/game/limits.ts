@@ -39,9 +39,10 @@ const SOCKET_LIMITS: Record<string, Limit> = {
   'team:join': { perSecond: 1, burst: 5 },
   'team:shuffle': { perSecond: 1, burst: 5 },
   'team:rename': { perSecond: 1, burst: 5 },
-  // Clients ping every 10 s and report once a minute.
+  // Clients ping every 10 s and report once a minute. Reports are kept for
+  // weeks, so no more than that.
   'net:ping': { perSecond: 1, burst: 3 },
-  'net:report': { perSecond: 0.1, burst: 3 },
+  'net:report': { perSecond: 1 / 50, burst: 2 },
   'room:resume': { perSecond: 2, burst: 5 },
   'room:create': { perSecond: 1, burst: 3 },
   'room:join': { perSecond: 2, burst: 5 },
@@ -59,6 +60,8 @@ const IP_LIMITS: Record<string, Limit> = {
   'room:create': { perSecond: 2 * IP_SCALE, burst: 100 * IP_SCALE },
   'room:join': { perSecond: 20 * IP_SCALE, burst: 400 * IP_SCALE },
   'room:resume': { perSecond: 20 * IP_SCALE, burst: 400 * IP_SCALE },
+  // A whole office's players reporting once a minute, and no more.
+  'net:report': { perSecond: 10 * IP_SCALE, burst: 600 * IP_SCALE },
 };
 
 /** Concurrent sockets per address. An office NAT is the reason this is high. */

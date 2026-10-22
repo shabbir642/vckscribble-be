@@ -26,7 +26,7 @@ import {
 import { wordsHandler } from './http/words.js';
 import { registerHandlers } from './game/handlers.js';
 import { closeConnection, openConnection, sweepLimits } from './game/limits.js';
-import { netSummary } from './game/netStats.js';
+import { ensureNetTable, netSummary, saveNetReports } from './game/netStats.js';
 import { SHARD, SHARDS } from './shard.js';
 import { ensureSnapshotTable, loadRooms, saveRooms } from './game/persist.js';
 import { RoundEngine } from './game/round.js';
@@ -156,7 +156,8 @@ const routes: Record<string, (req: Request, body: unknown) => Reply> = {
   'POST /api/client-log': clientLog,
 };
 
-app.any('/api/*', (res, req) => {
+/** Every name this process answers on gets it (see the server names below). */
+function api(res: UWS.HttpResponse, req: UWS.HttpRequest): void {
   const r = readRequest(res, req, TRUST_PROXY);
   const cors = corsHeaders(r.headers['origin'], CLIENT_ORIGIN);
   if (r.method === 'OPTIONS') {
@@ -191,7 +192,8 @@ app.any('/api/*', (res, req) => {
       send(res, { status: 500, body: { ok: false } }, cors);
     }
   });
-});
+}
+app.any('/api/*', api);
 
 export const io = new Server<ClientToServerEvents, ServerToClientEvents>({
   cors: { origin: CLIENT_ORIGIN, credentials: true },
@@ -256,6 +258,7 @@ const engine = new RoundEngine(io);
  */
 const RESTORE_GRACE_MS = 30_000;
 ensureSnapshotTable();
+ensureNetTable();
 const restored = loadRooms();
 for (const { room, downtimeMs } of restored) {
   store.adopt(room, RESTORE_GRACE_MS);
@@ -296,12 +299,19 @@ ticker.unref();
 const netLogger = setInterval(() => {
   const n = netSummary();
   if (!n.reports) return;
+  const byRoute = Object.entries(n.routes)
+    .map(([route, r]) => `${route} ${r.reports} (p50 ${r.rttP50}ms)`)
+    .join(', ');
   console.log(
     `[net] ${n.reports} reports/15min: rtt p50 ${n.rttP50}ms p95 ${n.rttP95}ms, ` +
-      `${n.lostPings} lost pings, ${n.reconnects} reconnects, ${Math.round(n.directShare * 100)}% direct`,
+      `${n.lostPings} lost pings, ${n.reconnects} reconnects; by route: ${byRoute}`,
   );
 }, 5 * 60_000);
 netLogger.unref();
+
+/** Every report, kept beyond this process's life (see netStats.ts). */
+const netSaver = setInterval(() => saveNetReports(), 60_000);
+netSaver.unref();
 
 /** Reaps abandoned lobby seats and dead rooms; see RoomStore.sweep. */
 const sweeper = setInterval(() => {
@@ -321,7 +331,8 @@ sweeper.unref();
 
 /**
  * The other site names on the direct port. Each gets its own certificate by
- * SNI — and, in uWS, its own routes, so the game's are added for it too.
+ * SNI — and, in uWS, its own empty set of routes, so the game's and the API's
+ * are added for it too (browsers ask /api/shards there before connecting).
  * They share the one engine, so a room spans every name. Last before
  * listening: app.domain() points every later route at that name.
  */
@@ -332,8 +343,10 @@ if (TLS) {
       continue;
     }
     app.addServerName(name, certFiles(TLS.dir, name));
+    const named = app.domain(name);
+    named.any('/api/*', api);
     (io.engine as unknown as { attach(app: UWS.TemplatedApp, o: object): void })
-      .attach(app.domain(name), { path: io.path(), maxBackpressure: MAX_BACKPRESSURE });
+      .attach(named, { path: io.path(), maxBackpressure: MAX_BACKPRESSURE });
   }
 }
 
@@ -376,6 +389,7 @@ function shutdown(signal: string): void {
   }
   clearInterval(ticker);
   clearInterval(sweeper);
+  saveNetReports();
   io.close();
   for (const sock of listenSockets) uWS.us_listen_socket_close(sock);
   try {

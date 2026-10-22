@@ -8,7 +8,7 @@
  * Keep this file dependency-free so both repos can consume it as-is.
  */
 
-export const CONTRACT_VERSION = 16;
+export const CONTRACT_VERSION = 17;
 
 /* ---------------------------------------------------------------- domain */
 
@@ -393,6 +393,20 @@ export interface ClientToServerEvents {
   'net:report': (p: NetReport) => void;
 }
 
+/**
+ * How a browser reaches the game server, fastest first:
+ * - `direct`: straight to the game server, on its own port (8443 + N);
+ * - `direct443`: straight to the same machine on port 443, through its web
+ *   server, using the game's own name (play.<site>), for networks that
+ *   allow 443 and nothing else;
+ * - `proxied`: through the site's CDN (Cloudflare), which from India can
+ *   detour through Singapore and add hundreds of milliseconds.
+ */
+export type NetRoute = 'direct' | 'direct443' | 'proxied';
+export const NET_ROUTES: readonly NetRoute[] = ['direct', 'direct443', 'proxied'];
+/** Why a browser passed over one of the faster routes. */
+export type RouteTrouble = 'blocked' | 'lossy';
+
 export interface NetReport {
   /** Round trips measured this period, in ms, summarized. */
   rttP50: number;
@@ -403,8 +417,18 @@ export interface NetReport {
   lost: number;
   /** Times the connection dropped and came back this period. */
   reconnects: number;
-  /** Connected straight to the game server rather than through the proxy. */
+  /** On route `direct`: straight to the game server's own port. */
   direct: boolean;
+  /** The route the connection takes; older clients send only `direct`. */
+  route?: NetRoute;
+  /**
+   * Faster routes this browser passes over, and why: blocked (never
+   * connected from this network) or lossy (connected, but replies went
+   * missing or came back slowly).
+   */
+  skipped?: Partial<Record<Exclude<NetRoute, 'proxied'>, RouteTrouble>>;
+  /** The device's own name for its network, where the browser tells (Chrome on Android): wifi, cellular… */
+  link?: string;
 }
 
 /* ----------------------------------------------- server -> client events */

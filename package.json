@@ -15,6 +15,7 @@
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
     "db:seed": "tsx src/db/seed-run.ts",
+    "net:report": "tsx src/tools/netReport.ts",
     "smoke": "node scripts/smoke.mjs",
     "smoke:game": "node scripts/smoke-game.mjs",
     "smoke:guess": "node scripts/smoke-guess.mjs",
