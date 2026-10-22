@@ -123,9 +123,11 @@ first copy, so install it before the first start:
 When Caddy renews the certificate (about every 60 days), the copy follows
 within a minute and the game server restarts itself to load it as soon as
 nobody is connected (within 7 days regardless; rooms are saved and restored,
-as on a deploy). Networks that block port 8443 fall back to port 443 through
-Caddy automatically; `direct` in `/api/health` counts the players connected
-the fast way.
+as on a deploy). Networks that block port 8443 use port 443 instead: still
+straight to this server under the same name (through Caddy), and only if
+that fails too, through the site's own address (Cloudflare, once set up —
+see 8c). `direct` in `/api/health` counts the players connected the fastest
+way; `network.routes` shows how each route feels to the players on it.
 
 ## 6c. One game process per CPU core
 
@@ -174,6 +176,27 @@ edge only, and every deploy clears the copies, so nobody gets a stale page.
 Without the token, deploys skip the purge, and pages are not cached until
 `setup` has run.
 
+## 8c. The website only through Cloudflare
+
+Once every site name is proxied by Cloudflare (orange cloud) — the game's own
+names (`GAME_HOST`, `EXTRA_GAME_HOSTS`) stay DNS only — make the website
+answer Cloudflare alone, so an attack that aims at this server's address
+skips nothing:
+
+```bash
+/opt/vmock-skribble/vckscribble-be/deploy/cloudflare-firewall.sh        # check
+/opt/vmock-skribble/vckscribble-be/deploy/cloudflare-firewall.sh apply
+(crontab -l 2>/dev/null; echo "17 4 1 * * /opt/vmock-skribble/vckscribble-be/deploy/cloudflare-firewall.sh apply >> /var/log/vmock-firewall.log 2>&1") | crontab -
+```
+
+It writes Cloudflare's ranges to `SITE_ONLY_FROM` in `.env`, and Caddy then
+serves pages to those addresses only (and to this server's own checks).
+Port 443 stays open to everyone: under the game's own names it carries the
+game for players whose network blocks 8443, straight to this server — from
+India, Cloudflare can answer from Singapore, hundreds of milliseconds away.
+Anyone else gets the game's endpoints and nothing more. The monthly run
+picks up new Cloudflare ranges; `undo` opens the website to everyone again.
+
 ## Updating
 
 Push to `main`. Within a minute of CI passing, the server deploys it
@@ -212,6 +235,11 @@ together — the frontend and backend share a protocol version.
   a quiet log means nothing has gone wrong.
 - `https://vmock.fun/api/health` reports players connected, rooms, memory and
   event-loop lag (`loopLagMs`, the number that means "lag" for players).
+- **Players' connections.** Every player's browser reports its round trips
+  once a minute, and the reports are kept for 60 days. To see which route
+  players end up on (direct, direct443, proxied), why they passed over the
+  faster ones and how each feels, for the last 7 days:
+  `docker compose exec backend node dist/tools/netReport.js 7`.
 - `docker compose logs --tail 100 backend` shows joins, leaves, kicks, and
   errors reported by players' browsers.
 
@@ -225,4 +253,5 @@ together — the frontend and backend share a protocol version.
 | `/api` or the game is 502 but the home page loads | Caddy cannot reach the backend's Unix socket: `docker compose ps` (backend healthy?), `docker compose logs backend` |
 | Backend log says "waiting for a certificate" | `sync-certs.sh` has not copied one yet: run it by hand, check `/var/log/vmock-certs.log` and that `GAME_HOST` is one of the `DOMAIN` names |
 | `direct` in `/api/health` stays 0 while people play | Direct ports closed: `ufw status` must allow `8443:8458/tcp`; everyone is falling back to 443 |
+| Pages load, but every player is on route `proxied` (`netReport.js`) | Port 443 must be open to everyone (`ufw status`), and the game's names must resolve to this server, not Cloudflare (grey cloud) |
 | Everything was fine, now it's down | `docker compose ps`; `docker compose up -d` restarts anything stopped |

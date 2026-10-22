@@ -54,13 +54,18 @@ services:
     depends_on:
       backend: { condition: service_started }
     # The host's network directly, not Docker's bridge: players' traffic skips
-    # Docker's port forwarding (NAT and connection tracking). Caddy binds 80
-    # and 443 (and 443/udp for HTTP/3) itself; the host firewall (ufw) now
-    # governs them, and setup-server.sh opens exactly those.
+    # Docker's port forwarding (NAT and connection tracking), and Caddy sees
+    # their real addresses (SITE_ONLY_FROM depends on it). Caddy binds 80 and
+    # 443 (and 443/udp for HTTP/3) itself; the host firewall (ufw) now governs
+    # them, and setup-server.sh opens exactly those.
     network_mode: host
     environment:
       DOMAIN: ${DOMAIN}
       GAME_HOST: ${GAME_HOST}
+      # Who may load the website from this server: everyone, until the site is
+      # behind Cloudflare and cloudflare-firewall.sh writes Cloudflare's ranges
+      # to .env. The game's endpoints answer everyone regardless.
+      SITE_ONLY_FROM: "${SITE_ONLY_FROM:-0.0.0.0/0 ::/0}"
     ulimits:
       nofile: { soft: 65535, hard: 65535 }
     volumes:

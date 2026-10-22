@@ -19,9 +19,11 @@
 redir @www https://{re.www.1}{uri} 301
 
 # Backend, for players whose network blocks the direct game port (everyone
-# else connects to the game server itself, on GAME_HOST:8443 + N). Over the
-# Unix sockets the game-server processes listen on (a volume shared by both
-# containers); they speak HTTPS there too, as each serves both, so the
+# else connects to the game server itself, on GAME_HOST:8443 + N): straight
+# here on 443 under the game's own names (GAME_HOST, EXTRA_GAME_HOSTS —
+# play.<site>, DNS only), else through Cloudflare under the site's names.
+# Over the Unix sockets the game-server processes listen on (a volume shared
+# by both containers); they speak HTTPS there too, as each serves both, so the
 # connection is TLS checked against GAME_HOST's own certificate. WebSocket
 # upgrades pass through as-is; X-Forwarded-For is set to just the player's
 # address — Cloudflare's, resolved as above, never a client-supplied chain.
@@ -60,7 +62,16 @@ handle @backend {
 # The guide pages are files like how-to-play.html, served at /how-to-play;
 # any other address is the game. A missing asset is a 404, never the page:
 # that would be cached for a year as the script.
+#
+# Once the site is behind Cloudflare, the website is for Cloudflare alone:
+# SITE_ONLY_FROM holds its ranges (cloudflare-firewall.sh keeps them current),
+# and anyone else who reaches this server directly — port 443 is open to all
+# for the game's own names — gets the game endpoints above and nothing more.
+# This server's own checks (127.0.0.1) always get through. Unset, it is
+# everyone, as before the move to Cloudflare.
 handle {
+	@not_from_cloudflare not remote_ip private_ranges {$SITE_ONLY_FROM:0.0.0.0/0 ::/0}
+	abort @not_from_cloudflare
 	root * /srv
 	encode zstd gzip
 	@assets {
